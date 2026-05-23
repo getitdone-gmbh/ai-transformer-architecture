@@ -48,7 +48,7 @@ CHECKPOINT_EVERY_N_EPOCHS = 2
 AUTO_RESUME = True          # neuesten checkpoint_epoch_*.pt automatisch laden
 RESUME_FROM = None          # ueberschreibt AUTO_RESUME wenn gesetzt
 # Architektur-Marker im Checkpoint, damit alte Files erkannt werden
-ARCH_VERSION = "pre_ln_tied_swiglu_rope_v1"
+ARCH_VERSION = "pre_ln_tied_swiglu_rope_init_v1"
 
 
 # ============================================================
@@ -104,11 +104,21 @@ class TextDataset(Dataset):
 # ============================================================
 
 class TokenEmbedding(nn.Module):
-    """Token-Lookup + Skalierung.
+    """Token-Lookup, ohne weitere Skalierung.
 
-    KEINE additive Positional Encoding mehr — Positions-Information wird
-    jetzt via RoPE direkt im Attention-Layer auf Q und K angewendet
-    (siehe RotaryEmbedding / apply_rotary unten).
+    Frueher: `embedding(x) * sqrt(d_model)`. Das stammt aus dem Original-
+    Transformer (Vaswani 2017), wo die Multiplikation die Embedding-Magnitude
+    an die additive sinusoidale Positional Encoding (Werte in [-1, 1])
+    anpassen sollte.
+
+    Mit unserer modernen Architektur ist die Skalierung sogar SCHAEDLICH:
+      - RoPE ersetzt die additive PE -> die Magnitude-Anpassung ist unnoetig.
+      - Weight Tying: dieselbe Matrix bildet Tokens ein UND macht die End-
+        Projektion. Skalierte Inputs blaehen die Magnitude des Residual-
+        Streams auf, was nach norm_f zu sehr grossen initialen Logits fuehrt
+        und damit zu einem absurd hohen initialen Loss (484 statt log(50257)).
+
+    Deshalb: keine Skalierung mehr. Modernes LLM-Recipe (GPT-2, Llama).
     """
 
     def __init__(self, vocab_size, d_model):
@@ -117,7 +127,7 @@ class TokenEmbedding(nn.Module):
         self.d_model = d_model
 
     def forward(self, x):
-        return self.embedding(x) * math.sqrt(self.d_model)
+        return self.embedding(x)
 
 
 class RotaryEmbedding(nn.Module):
@@ -345,6 +355,8 @@ class GPTDecoder(nn.Module):
 
     def __init__(self, vocab_size, d_model, num_heads, d_ff, num_layers, dropout=0.1):
         super().__init__()
+        self.num_layers = num_layers
+
         self.embedding = TokenEmbedding(vocab_size, d_model)
         self.decoder_blocks = nn.ModuleList([
             DecoderBlock(d_model, num_heads, d_ff, dropout)
@@ -365,6 +377,39 @@ class GPTDecoder(nn.Module):
         self.lm_head.weight = self.embedding.embedding.weight
 
         self.dropout = nn.Dropout(dropout)
+
+        # GPT-2 Init-Recipe — siehe _init_weights.
+        # Reihenfolge wichtig: erst Tying, dann Init, damit beide Verweise
+        # auf dieselbe Parameter-Instanz dasselbe initiale Sample sehen.
+        self.apply(self._init_weights)
+
+        # Skalierte Init fuer "Output"-Projektionen jeder Residual-Branch:
+        # nach Pre-LN wachsen die Aktivierungen sonst pro Block linear an,
+        # weil jedes Residual aufaddiert. Wir teilen die initiale Magnitude
+        # dieser Projektionen durch sqrt(2 * num_layers) — Standard-Trick
+        # aus dem GPT-2 Paper. Betrifft W_o (Attention-Output) und w_down
+        # (SwiGLU-Output).
+        proj_std = 0.02 / math.sqrt(2 * num_layers)
+        for block in self.decoder_blocks:
+            nn.init.normal_(block.attention.W_o.weight, mean=0.0, std=proj_std)
+            nn.init.normal_(block.feed_forward.w_down.weight, mean=0.0, std=proj_std)
+
+    @staticmethod
+    def _init_weights(module):
+        """GPT-2 Init-Schema: alle gewichteten Layers ~ N(0, 0.02^2), Biases = 0.
+
+        Warum 0.02? Empirischer Wert aus dem GPT-2 Paper, gut kalibriert
+        fuer LayerNorm-basierte Transformer. Sorgt dafuer, dass:
+          - Initial-Aktivierungen bleiben in einem vernuenftigen Bereich.
+          - Initial-Logits klein sind (~N(0, sqrt(d_model)*0.02) = ~0.45),
+            d.h. Softmax fast uniform -> Initial-Loss ≈ log(vocab_size).
+        """
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, x, mask=None):
         x = self.embedding(x)
