@@ -31,24 +31,27 @@ DROPOUT = 0.1
 
 # Training
 SEQ_LENGTH = 128
-BATCH_SIZE = 8
-LEARNING_RATE = 3e-4   # peak LR (Ende des Warmups, Start des Cosine-Decays)
-MIN_LR = 3e-5          # LR-Untergrenze nach komplettem Cosine-Decay
-WARMUP_STEPS = 100     # linearer Warmup ueber die ersten N Optimizer-Steps
-GRAD_CLIP = 1.0        # globale L2-Norm-Schranke fuer Gradienten
-NUM_EPOCHS = 10
+BATCH_SIZE = 32                # 4x mehr Tokens/Batch -> bessere GPU-Auslastung
+LEARNING_RATE = 6e-4           # peak LR — sqrt-Skalierung von 3e-4 wegen 4x Batch
+MIN_LR = 6e-5                  # LR-Untergrenze nach komplettem Cosine-Decay
+WARMUP_STEPS = 500             # linearer Warmup ueber die ersten N Optimizer-Steps
+GRAD_CLIP = 1.0                # globale L2-Norm-Schranke fuer Gradienten
+NUM_EPOCHS = 2
+USE_TORCH_COMPILE = True       # torch.compile auf MPS — experimentell, fallback bei Fehler
 
 # Daten
-NUM_ARTICLES = 1000
-VAL_FRACTION = 0.05    # Anteil Tokens fuer Validation-Split (Ende der Sequenz)
+NUM_ARTICLES = 50000
+VAL_FRACTION = 0.02    # Anteil Tokens fuer Validation-Split (Ende der Sequenz)
+DATA_CACHE_DIR = "data_cache"  # Token-Cache, damit Re-Runs nicht neu tokenisieren
 
 # Checkpoints
 CHECKPOINT_DIR = "."
-CHECKPOINT_EVERY_N_EPOCHS = 2
-AUTO_RESUME = True          # neuesten checkpoint_epoch_*.pt automatisch laden
-RESUME_FROM = None          # ueberschreibt AUTO_RESUME wenn gesetzt
+CHECKPOINT_EVERY_N_EPOCHS = 1     # ganze Epochen sind jetzt lang -> jede speichern
+CHECKPOINT_EVERY_N_STEPS = 2000   # zusaetzlich rolling 'checkpoint_latest.pt'
+AUTO_RESUME = True                # neuesten Checkpoint automatisch laden
+RESUME_FROM = None                # ueberschreibt AUTO_RESUME wenn gesetzt
 # Architektur-Marker im Checkpoint, damit alte Files erkannt werden
-ARCH_VERSION = "pre_ln_tied_swiglu_rope_init_v1"
+ARCH_VERSION = "pre_ln_tied_swiglu_rope_init_rms_v1"
 
 
 # ============================================================
@@ -67,13 +70,48 @@ def get_device():
 # Daten
 # ============================================================
 
-def load_wikipedia_text(num_articles):
-    """Laedt deutsche Wikipedia-Artikel und konkateniert ihren Text."""
+def get_or_build_tokens(num_articles, encoding, cache_dir=DATA_CACHE_DIR):
+    """Cached Tokenisierung: laedt Tokens aus Cache, oder baut + speichert.
+
+    Beim ersten Aufruf mit gegebenem num_articles: Wikipedia-Snapshot wird
+    artikelweise gelesen, in Chunks von 1000 batched-tokenisiert (mit
+    tiktoken's multi-threaded encode_ordinary_batch), und das resultierende
+    Tensor in {cache_dir}/tokens-de-{num_articles}.pt gespeichert.
+
+    Bei Folge-Aufrufen wird nur das Tensor von Disk geladen — spart bei
+    50k+ Artikeln pro Run-Start mehrere Minuten Tokenisierung.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"tokens-de-{num_articles}.pt")
+
+    if os.path.exists(cache_path):
+        print(f"Lade Token-Cache: {cache_path}")
+        tokens = torch.load(cache_path, weights_only=True)
+        print(f"  Tokens: {len(tokens):,}")
+        return tokens
+
+    print(f"Tokenisiere {num_articles} Wikipedia-Artikel (kein Cache vorhanden)...")
     ds = load_dataset(
         "wikimedia/wikipedia", "20231101.de", split="train", streaming=False
     )
     ds = ds.select(range(min(num_articles, len(ds))))
-    return " ".join(article["text"] for article in ds)
+
+    all_tokens = []
+    chunk = 1000
+    for i in range(0, len(ds), chunk):
+        end = min(i + chunk, len(ds))
+        texts = [a["text"] for a in ds.select(range(i, end))]
+        # encode_ordinary_batch: multi-threaded, keine Special-Token-Pruefung
+        batched = encoding.encode_ordinary_batch(texts, num_threads=4)
+        for tok_list in batched:
+            all_tokens.extend(tok_list)
+        print(f"  {end:>6}/{len(ds)}: {len(all_tokens):,} tokens")
+
+    tokens = torch.tensor(all_tokens, dtype=torch.int32)
+    mb = tokens.element_size() * tokens.numel() / 1024**2
+    print(f"  Cache schreiben: {cache_path} ({mb:.1f} MB)")
+    torch.save(tokens, cache_path)
+    return tokens
 
 
 class TextDataset(Dataset):
@@ -318,6 +356,40 @@ class SwiGLU(nn.Module):
         return out
 
 
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization (Zhang & Sennrich 2019).
+
+    Vereinfachung der LayerNorm:
+      LayerNorm: y = gamma * (x - mean(x)) / std(x) + beta    (4 stats, 2 params)
+      RMSNorm:   y = gamma * x / RMS(x)                       (1 stat,  1 param)
+
+    Wo RMS(x) = sqrt(mean(x^2)) ueber die letzte Dimension berechnet wird.
+
+    Was wegfaellt:
+      - Mean-Subtraktion ("re-centering"). Empirisch in Transformern entbehrlich.
+      - Bias (beta). Kann von nachfolgenden Linear-Layers absorbiert werden.
+
+    Was bleibt:
+      - Magnitude-Normalisierung. Sichert stabilen Forward/Backward.
+      - Gelernte Skalierung (gamma).
+
+    Vorteile: ~10-20 % weniger Operations, gleich gute (oft minimal bessere)
+    Trainings-Dynamik. Standard in Llama, Mistral, Qwen, Gemma, Falcon.
+    """
+
+    def __init__(self, d_model, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d_model))
+        self.eps = eps
+
+    def forward(self, x):
+        # mean of squares ueber die letzte Dimension; rsqrt = 1/sqrt
+        # (eine Hardware-Instruktion, schneller als getrennte Division)
+        ms = x.pow(2).mean(dim=-1, keepdim=True)
+        x_normalized = x * torch.rsqrt(ms + self.eps)
+        return self.weight * x_normalized
+
+
 class DecoderBlock(nn.Module):
     """Transformer Decoder Block mit Pre-LayerNorm.
 
@@ -332,8 +404,8 @@ class DecoderBlock(nn.Module):
         super().__init__()
         self.attention = MultiHeadAttention(d_model, num_heads, dropout)
         self.feed_forward = SwiGLU(d_model, d_ff, dropout)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
+        self.norm1 = RMSNorm(d_model)
+        self.norm2 = RMSNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, mask=None):
@@ -363,9 +435,9 @@ class GPTDecoder(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # Pre-LN braucht eine finale LayerNorm vor dem LM-Head, sonst kann
+        # Pre-LN braucht eine finale Norm vor dem LM-Head, sonst kann
         # der Residual-Stream ueber die Layer hinweg unbeschraenkt wachsen.
-        self.norm_f = nn.LayerNorm(d_model)
+        self.norm_f = RMSNorm(d_model)
 
         # bias=False, weil wir die Gewichte mit der Embedding-Matrix teilen.
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
@@ -420,13 +492,67 @@ class GPTDecoder(nn.Module):
         return self.lm_head(x)
 
     @torch.no_grad()
-    def generate(self, input_ids, max_new_tokens=50, temperature=1.0):
+    def generate(self, input_ids, max_new_tokens=50, temperature=1.0,
+                 top_k=None, top_p=None, repetition_penalty=1.0):
+        """Autoregressives Sampling mit modernen Decoding-Strategien.
+
+        temperature: skaliert Logits vor Softmax. <1 schaerfer, >1 flacher.
+        top_k:       behalte nur die k wahrscheinlichsten Tokens.
+        top_p:       Nucleus-Sampling — behalte Tokens deren kumulative
+                     Wahrscheinlichkeit <= p ist.
+        repetition_penalty:
+                     >1.0 reduziert die Wahrscheinlichkeit von Tokens, die
+                     bereits im Kontext sind (gegen "Stadt im Stadt im Stadt").
+
+        Reihenfolge: rep_penalty -> /temperature -> top_k -> top_p -> sample.
+        """
         self.eval()
         for _ in range(max_new_tokens):
             seq_len = input_ids.size(1)
             mask = create_causal_mask(seq_len, input_ids.device)
             logits = self.forward(input_ids, mask)
-            logits = logits[:, -1, :] / temperature
+            logits = logits[:, -1, :]  # [B, V] — Logits fuer das naechste Token
+
+            # 1. Repetition Penalty: Logits bereits gesehener Tokens daempfen.
+            # HuggingFace-Konvention: positive Logits / penalty, negative * penalty
+            # (beides treibt das Logit Richtung minus-unendlich).
+            if repetition_penalty != 1.0:
+                for b in range(input_ids.size(0)):
+                    seen = torch.unique(input_ids[b])
+                    score = logits[b, seen]
+                    logits[b, seen] = torch.where(
+                        score < 0, score * repetition_penalty, score / repetition_penalty
+                    )
+
+            # 2. Temperature
+            logits = logits / temperature
+
+            # 3. Top-k: setze alle ausser den top-k Logits auf -inf.
+            if top_k is not None and top_k > 0:
+                k = min(top_k, logits.size(-1))
+                topk_vals, _ = torch.topk(logits, k)
+                threshold = topk_vals[..., -1, None]  # kleinster Top-k Wert
+                logits = torch.where(logits < threshold,
+                                     torch.full_like(logits, float("-inf")),
+                                     logits)
+
+            # 4. Top-p (Nucleus): sortiere absteigend, behalte minimale
+            # Tokenmenge deren kumulative Prob >= top_p ist.
+            if top_p is not None and 0.0 < top_p < 1.0:
+                sorted_logits, sorted_idx = torch.sort(logits, descending=True)
+                sorted_probs = F.softmax(sorted_logits, dim=-1)
+                cumulative = torch.cumsum(sorted_probs, dim=-1)
+                # Tokens markieren, deren kumulative Prob top_p ueberschreitet.
+                remove_sorted = cumulative > top_p
+                # Shift nach rechts — den ersten Ueberschreiter noch behalten.
+                remove_sorted[..., 1:] = remove_sorted[..., :-1].clone()
+                remove_sorted[..., 0] = False
+                # Maske zurueck auf Original-Indizes mappen.
+                remove = torch.zeros_like(logits, dtype=torch.bool)
+                remove.scatter_(-1, sorted_idx, remove_sorted)
+                logits = logits.masked_fill(remove, float("-inf"))
+
+            # 5. Softmax + Multinomial Sample
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             input_ids = torch.cat([input_ids, next_token], dim=1)
@@ -473,16 +599,22 @@ def load_checkpoint(filepath, model, optimizer, device):
 
 
 def find_latest_checkpoint(directory):
-    """Sucht checkpoint_epoch_N.pt mit groesstem N. None wenn keiner da."""
-    candidates = []
-    for path in glob.glob(os.path.join(directory, "checkpoint_epoch_*.pt")):
-        m = re.search(r"checkpoint_epoch_(\d+)\.pt$", path)
-        if m:
-            candidates.append((int(m.group(1)), path))
-    if not candidates:
+    """Sucht den juengsten Checkpoint (epoch- oder rolling-latest).
+
+    Beruecksichtigt:
+      - checkpoint_epoch_N.pt (am Epoche-Ende geschrieben)
+      - checkpoint_latest.pt  (rolling mid-epoch, immer ueberschrieben)
+
+    Auswahl per mtime — der zuletzt geschriebene Checkpoint gewinnt,
+    egal welcher Typ. None wenn nichts gefunden.
+    """
+    paths = glob.glob(os.path.join(directory, "checkpoint_epoch_*.pt"))
+    latest_path = os.path.join(directory, "checkpoint_latest.pt")
+    if os.path.exists(latest_path):
+        paths.append(latest_path)
+    if not paths:
         return None
-    candidates.sort()
-    return candidates[-1][1]
+    return max(paths, key=os.path.getmtime)
 
 
 # ============================================================
@@ -511,7 +643,14 @@ def get_lr(step, warmup_steps, max_steps, base_lr, min_lr):
 
 
 def train_epoch(model, dataloader, criterion, optimizer, device, vocab_size,
-                global_step, max_steps, warmup_steps, base_lr, min_lr, grad_clip):
+                global_step, max_steps, warmup_steps, base_lr, min_lr, grad_clip,
+                save_step_interval=None, save_callback=None):
+    """Trainiert eine Epoche. Mit optionaler Mid-Epoch-Checkpoint-Callback.
+
+    save_step_interval: alle N Optimizer-Steps save_callback(global_step, loss)
+                       aufrufen. Erlaubt Survival bei Stop/Start mitten in der
+                       Epoche, ohne dass die ganze Epoche redone werden muss.
+    """
     model.train()
     total_loss = 0.0
     last_lr = 0.0
@@ -547,6 +686,10 @@ def train_epoch(model, dataloader, criterion, optimizer, device, vocab_size,
             print(f"  Batch {batch_idx + 1}/{len(dataloader)}, "
                   f"loss={loss.item():.4f}, lr={lr:.2e}")
 
+        # Rolling Mid-Epoch Checkpoint
+        if save_step_interval and save_callback and global_step % save_step_interval == 0:
+            save_callback(global_step, loss.item())
+
     return total_loss / len(dataloader), global_step, last_lr
 
 
@@ -571,11 +714,19 @@ def evaluate(model, dataloader, criterion, device, vocab_size):
     return total_loss / max(1, n_batches)
 
 
-def generate_samples(model, encoding, device, prompts, max_new_tokens=20, temperature=0.8):
+def generate_samples(model, encoding, device, prompts, max_new_tokens=20,
+                     temperature=0.8, top_p=0.9, repetition_penalty=1.2):
+    """Generiert Samples mit konservativem, repetitions-armem Sampling."""
     for prompt in prompts:
         start = encoding.encode(prompt)
         input_ids = torch.tensor([start], device=device)
-        out_ids = model.generate(input_ids, max_new_tokens=max_new_tokens, temperature=temperature)
+        out_ids = model.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+        )
         text = encoding.decode(out_ids[0].cpu().tolist())
         print(f"  '{text}'")
 
@@ -589,15 +740,11 @@ def main():
     print(f"Device: {device}")
     print(f"PyTorch: {torch.__version__}\n")
 
-    # --- Daten ---
-    print(f"Lade {NUM_ARTICLES} Wikipedia-Artikel...")
-    text = load_wikipedia_text(NUM_ARTICLES)
-    print(f"  Zeichen: {len(text):,}")
-
+    # --- Daten (cached) ---
     encoding = tiktoken.get_encoding("gpt2")
-    tokens = encoding.encode(text)
     vocab_size = encoding.n_vocab
-    print(f"  Tokens: {len(tokens):,} (Vocab: {vocab_size})")
+    tokens = get_or_build_tokens(NUM_ARTICLES, encoding)
+    print(f"  Vocab: {vocab_size}")
 
     # Train / Val Split — letzte VAL_FRACTION der Tokens als Validation.
     # (Sequentieller Split, NICHT Shuffle: Wikipedia-Artikel sind im
@@ -624,7 +771,18 @@ def main():
         dropout=DROPOUT,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Modell: {n_params:,} Parameter\n")
+    print(f"Modell: {n_params:,} Parameter")
+
+    # torch.compile: fusioniert Ops, eliminiert Sync-Punkte, kann auf MPS
+    # 30-100 % Speedup bringen. Erster Forward-Pass ist langsam (Kompilation),
+    # danach schneller. Fail-safe: bei Crash auf eager fallback.
+    if USE_TORCH_COMPILE:
+        try:
+            model = torch.compile(model)
+            print("torch.compile: aktiv (erster Batch laeuft langsamer wegen JIT)")
+        except Exception as e:
+            print(f"torch.compile fehlgeschlagen, eager mode: {e}")
+    print()
 
     # --- Optimizer + Loss ---
     criterion = nn.CrossEntropyLoss()
@@ -658,9 +816,20 @@ def main():
 
     for epoch in range(start_epoch, NUM_EPOCHS):
         print(f"\nEpoche {epoch + 1}/{NUM_EPOCHS}")
+
+        # Rolling Mid-Epoch Checkpoint Callback. Schreibt 'checkpoint_latest.pt'
+        # mit aktueller Epoche, sodass ein Resume diese Epoche von vorn beginnt
+        # (Worst Case: bis zu save_step_interval Batches werden re-done).
+        def save_rolling(step, current_loss, epoch=epoch):
+            save_checkpoint(
+                model, optimizer, epoch, step, current_loss,
+                "checkpoint_latest.pt", config,
+            )
+
         train_loss, global_step, last_lr = train_epoch(
             model, train_loader, criterion, optimizer, device, vocab_size,
             global_step, max_steps, WARMUP_STEPS, LEARNING_RATE, MIN_LR, GRAD_CLIP,
+            save_step_interval=CHECKPOINT_EVERY_N_STEPS, save_callback=save_rolling,
         )
         val_loss = evaluate(model, val_loader, criterion, device, vocab_size)
 

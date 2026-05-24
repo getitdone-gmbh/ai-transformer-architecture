@@ -28,3 +28,14 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db
+
+# Training logs
+logs/
+train.log
+
+# Tokenization cache
+data_cache/
+
+# Embedding snapshots + animation output
+snapshots/
+embedding_animation.html
