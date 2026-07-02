@@ -4,7 +4,9 @@ Decoder-only Architektur, trainiert mit Causal Language Modeling.
 Laeuft auf MPS (Apple Silicon), CUDA und CPU.
 """
 
+import bisect
 import glob
+import json
 import math
 import os
 import re
@@ -66,6 +68,14 @@ USE_AMP = _env("USE_AMP", True, bool)       # bf16-Autocast wenn die Hardware es
 NUM_ARTICLES = _env("NUM_ARTICLES", 400000, int)
 VAL_FRACTION = _env("VAL_FRACTION", 0.02, float)  # Anteil Tokens fuer Validation-Split
 DATA_CACHE_DIR = _env("DATA_CACHE_DIR", "data_cache", str)  # Token-Cache fuer Re-Runs
+# Shard-Modus (grosse Laeufe): Pfad zu shards/manifest.json aus
+# prepare_data.py. Wenn gesetzt, werden die uint16-Shards per memmap
+# gelesen statt des kleinen In-RAM-Token-Caches oben.
+SHARD_MANIFEST = _env("SHARD_MANIFEST", "", str)
+# DataLoader-Prozesse: Default 4 auf CUDA (Shard-Reads parallel zur GPU),
+# 0 auf MPS/CPU — dort wuerde macOS' spawn-Start den In-RAM-Token-Tensor
+# pro Worker einmal KOPIEREN (teuer), waehrend der Gewinn minimal ist.
+NUM_WORKERS = _env("NUM_WORKERS", 4 if torch.cuda.is_available() else 0, int)
 
 # Checkpoints
 CHECKPOINT_DIR = "."
@@ -190,6 +200,80 @@ class TextDataset(Dataset):
         # kopiert unnoetig (und PyTorch warnt davor). .long() macht genau
         # eine Kopie, die beiden Rueckgaben sind Views darauf.
         seq = self.tokens[start:end].long()
+        return seq[:-1], seq[1:]
+
+
+class ShardDataset(Dataset):
+    """Aligned Fenster ueber memmapped uint16-Shards (aus prepare_data.py).
+
+    Warum memmap: 10 Mrd. Tokens sind ~20 GB uint16 — zu viel fuer den RAM.
+    np.memmap oeffnet die Datei, ohne sie zu laden; das OS blendet nur die
+    tatsaechlich gelesenen Pages ein. Random Access auf NVMe ist dafuer
+    weit schneller als die GPU die Batches verbrauchen kann.
+
+    Split-Strategie: die letzten val_fraction Fenster JEDES Shards sind
+    Validation. So hat der Val-Split dieselbe Quellen-Mischung wie das
+    Training (Shards sind quellen-rein), und das Leak an der Schnittkante
+    ist hoechstens ein Dokument pro Shard.
+
+    Fenster sind seq_length-aligned wie bei TextDataset; an Shard-Grenzen
+    geht pro Shard maximal ein Fenster verloren — bei 100M-Token-Shards
+    vernachlaessigbar.
+    """
+
+    def __init__(self, manifest_path, seq_length, split="train", val_fraction=0.02):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        if manifest.get("tokenizer") != "gpt2":
+            raise RuntimeError(
+                f"Shards wurden mit Tokenizer '{manifest.get('tokenizer')}' "
+                "gebaut, das Training erwartet 'gpt2'."
+            )
+        base = os.path.dirname(manifest_path)
+        self.seq_length = seq_length
+        self._paths = []
+        self._starts = []       # erstes Fenster dieses Shards (im Split)
+        cum = [0]               # kumulative Fensterzahl ueber die Shards
+        for shard in manifest["shards"]:
+            n_windows = (shard["num_tokens"] - 1) // seq_length
+            n_val = int(n_windows * val_fraction)
+            n_train = n_windows - n_val
+            start, count = (0, n_train) if split == "train" else (n_train, n_val)
+            if count <= 0:
+                continue
+            self._paths.append(os.path.join(base, shard["file"]))
+            self._starts.append(start)
+            cum.append(cum[-1] + count)
+        self._cum = cum
+        self._mmaps = {}  # shard-idx -> np.memmap, lazy pro Prozess
+
+    def __len__(self):
+        return self._cum[-1]
+
+    def __getstate__(self):
+        # DataLoader-Worker bekommen den Dataset per pickle. Ein np.memmap
+        # wuerde dabei als VOLLES Array serialisiert (der ganze Shard!) —
+        # deshalb die offenen Handles droppen; jeder Worker oeffnet lazy neu.
+        state = self.__dict__.copy()
+        state["_mmaps"] = {}
+        return state
+
+    def _tokens(self, shard_idx):
+        mm = self._mmaps.get(shard_idx)
+        if mm is None:
+            mm = np.memmap(self._paths[shard_idx], dtype=np.uint16, mode="r")
+            self._mmaps[shard_idx] = mm
+        return mm
+
+    def __getitem__(self, idx):
+        s = bisect.bisect_right(self._cum, idx) - 1
+        window = self._starts[s] + (idx - self._cum[s])
+        a = window * self.seq_length
+        chunk = self._tokens(s)[a : a + self.seq_length + 1]
+        # astype kopiert aus dem mmap in normalen RAM — noetig, damit der
+        # Tensor nicht auf der Datei zeigt (und fuer int64, das Embedding-
+        # Lookups erwarten).
+        seq = torch.from_numpy(chunk.astype(np.int64))
         return seq[:-1], seq[1:]
 
 
@@ -934,26 +1018,50 @@ def main():
     print(f"PyTorch: {torch.__version__}")
     print(f"Autocast: {amp_dtype if amp_dtype else 'aus (fp32)'}\n")
 
-    # --- Daten (cached) ---
+    # --- Daten ---
     encoding = tiktoken.get_encoding("gpt2")
     vocab_size = encoding.n_vocab
-    tokens = get_or_build_tokens(NUM_ARTICLES, encoding)
     print(f"  Vocab: {vocab_size}")
 
-    # Train / Val Split — letzte VAL_FRACTION der Tokens als Validation.
-    # (Sequentieller Split, NICHT Shuffle: Wikipedia-Artikel sind im
-    # Stream sequenziell konkateniert, ein zufaelliger Token-Shuffle wuerde
-    # Tokens aus demselben Artikel in beide Splits leaken.)
-    split_idx = int(len(tokens) * (1 - VAL_FRACTION))
-    train_tokens = tokens[:split_idx]
-    val_tokens = tokens[split_idx:]
-    print(f"  Split: {len(train_tokens):,} train / {len(val_tokens):,} val\n")
+    if SHARD_MANIFEST:
+        # Shard-Modus (grosse Laeufe): memmap ueber prepare_data.py-Shards.
+        if not os.path.exists(SHARD_MANIFEST):
+            raise FileNotFoundError(
+                f"SHARD_MANIFEST='{SHARD_MANIFEST}' existiert nicht — "
+                "erst `python prepare_data.py` laufen lassen."
+            )
+        train_ds = ShardDataset(SHARD_MANIFEST, SEQ_LENGTH, "train", VAL_FRACTION)
+        val_ds = ShardDataset(SHARD_MANIFEST, SEQ_LENGTH, "val", VAL_FRACTION)
+        n_tok = (len(train_ds) + len(val_ds)) * SEQ_LENGTH
+        print(f"  Shard-Modus: {SHARD_MANIFEST} (~{n_tok / 1e9:.2f} Mrd. Tokens)")
+        print(f"  Split: {len(train_ds):,} train / {len(val_ds):,} val Fenster\n")
+    else:
+        # Legacy-Modus (kleine Laeufe): ein Token-Tensor im RAM.
+        tokens = get_or_build_tokens(NUM_ARTICLES, encoding)
 
-    train_ds = TextDataset(train_tokens, seq_length=SEQ_LENGTH)
-    val_ds = TextDataset(val_tokens, seq_length=SEQ_LENGTH)
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
-    print(f"DataLoader: {len(train_loader)} train batches, {len(val_loader)} val batches\n")
+        # Train / Val Split — letzte VAL_FRACTION der Tokens als Validation.
+        # (Sequentieller Split, NICHT Shuffle: Wikipedia-Artikel sind im
+        # Stream sequenziell konkateniert, ein zufaelliger Token-Shuffle
+        # wuerde Tokens aus demselben Artikel in beide Splits leaken.)
+        split_idx = int(len(tokens) * (1 - VAL_FRACTION))
+        train_tokens = tokens[:split_idx]
+        val_tokens = tokens[split_idx:]
+        print(f"  Split: {len(train_tokens):,} train / {len(val_tokens):,} val\n")
+        train_ds = TextDataset(train_tokens, seq_length=SEQ_LENGTH)
+        val_ds = TextDataset(val_tokens, seq_length=SEQ_LENGTH)
+
+    # pin_memory (nur CUDA): Batches landen in page-locked RAM, der
+    # Host->GPU-Copy laeuft dann DMA-asynchron. num_workers>0 lagert das
+    # Lesen/Konvertieren in eigene Prozesse aus, damit die GPU nie auf
+    # Daten wartet — im Shard-Modus wichtig, weil dort pro Batch von der
+    # Disk gelesen wird.
+    pin = device.type == "cuda"
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
+                              drop_last=True, num_workers=NUM_WORKERS, pin_memory=pin)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
+                            drop_last=False, num_workers=NUM_WORKERS, pin_memory=pin)
+    print(f"DataLoader: {len(train_loader)} train batches, {len(val_loader)} val batches, "
+          f"{NUM_WORKERS} workers\n")
 
     # --- Modell ---
     model = GPTDecoder(

@@ -99,6 +99,37 @@ scp -P <PORT> root@<HOST>:~/transformer-test/checkpoint_epoch_1.pt ./checkpoint_
 Danach die Vast.ai-Instanz **zerstören** (nicht nur stoppen), sonst laufen
 Kosten weiter.
 
+## Stufe 3: Der 350M-Hauptlauf (~10 Mrd. Tokens)
+
+Nach erfolgreicher 124M-Generalprobe. Andere Dimensionen als oben:
+
+- **Instanz:** RTX 4090, aber **Disk auf 100 GB** (Shards ~20 GB + HF-Cache
+  + Checkpoints à ~4 GB) und auf **Reliability > 99 %** achten — der Lauf
+  dauert **4–6 Tage**. Kosten grob 40–60 $.
+- **Ablauf auf der Instanz:**
+
+```bash
+git clone <REPO> && cd transformer-test
+bash vastai_setup.sh
+
+# 1. Daten bauen (einmalig, mehrere Stunden — laeuft auf den CPU-Kernen):
+#    ~8 Mrd. Tokens FineWeb2-Deutsch + ~2 Mrd. Wikipedia -> shards/ (~20 GB)
+nohup python prepare_data.py > prepare.log 2>&1 &
+tail -f prepare.log
+
+# 2. Training starten (erst wenn prepare fertig ist):
+nohup bash run_350m.sh > /dev/null 2>&1 &
+tail -f train_350m.log
+```
+
+- `prepare_data.py` hat **Resume**: bricht der Job ab, einfach neu starten —
+  fertige Shards bleiben, der Stream wird vorgespult.
+- Das Training schreibt alle 2000 Steps `checkpoint_latest.pt` — bei einem
+  Host-Ausfall gehen maximal ~30 Minuten verloren (`AUTO_RESUME` laedt den
+  letzten Stand; Instanz neu mieten, Shards muessen dann allerdings neu
+  gebaut werden, ausser man sichert sie vorher per scp/Cloud).
+- Checkpoint am Ende ist ~4 GB — Rueckholen per scp dauert entsprechend.
+
 ## 7. Weiter geht's lokal
 
 Mit `checkpoint_124m.pt` können wir dann auf dem Mac die eigentlich spannenden

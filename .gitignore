@@ -39,3 +39,6 @@ data_cache/
 # Embedding snapshots + animation output
 snapshots/
 embedding_animation.html
+
+# Token-Shards (prepare_data.py Output, viele GB)
+shards/
