@@ -53,6 +53,12 @@ DROPOUT = _env("DROPOUT", 0.1, float)  # 0.0 waere Llama-Style; 0.1 schuetzt bei
 
 # Training
 SEQ_LENGTH = _env("SEQ_LENGTH", 512, int)   # 128 -> 512: laengerer Kontext, realistischer
+# RoPE-Buffer-Groesse (Positions-Tabellen). Bewusst GROESSER als SEQ_LENGTH:
+# RoPE kodiert relative Abstaende, das Modell kann daher moderat ueber die
+# Trainingslaenge hinaus extrapolieren — aber nur so weit, wie der Buffer
+# reicht. 4096 gibt Headroom fuer Extrapolations-Experimente und spaeteres
+# Long-Context-Finetuning, kostet nur ein paar MB (nicht im Checkpoint).
+ROPE_MAX_SEQ = _env("ROPE_MAX_SEQ", 4096, int)
 BATCH_SIZE = _env("BATCH_SIZE", 16, int)    # Mikro-Batch (was auf eine GPU passt)
 GRAD_ACCUM_STEPS = _env("GRAD_ACCUM_STEPS", 3, int)  # effektiv 16*3 = 48 Sequenzen/Update
 LEARNING_RATE = _env("LEARNING_RATE", 6e-4, float)   # peak LR — GPT-2-small-Standard
@@ -567,9 +573,10 @@ class DecoderBlock(nn.Module):
     doppelt gedroppt (effektiv ~0.19 statt 0.1).
     """
 
-    def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
+    def __init__(self, d_model, num_heads, d_ff, dropout=0.1, max_seq_len=4096):
         super().__init__()
-        self.attention = MultiHeadAttention(d_model, num_heads, dropout)
+        self.attention = MultiHeadAttention(d_model, num_heads, dropout,
+                                            max_seq_len=max_seq_len)
         self.feed_forward = SwiGLU(d_model, d_ff)
         self.norm1 = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
@@ -594,13 +601,14 @@ def create_causal_mask(seq_len, device):
 class GPTDecoder(nn.Module):
     """GPT-Style Decoder-only Transformer (Pre-LN + Weight Tying)."""
 
-    def __init__(self, vocab_size, d_model, num_heads, d_ff, num_layers, dropout=0.1):
+    def __init__(self, vocab_size, d_model, num_heads, d_ff, num_layers,
+                 dropout=0.1, max_seq_len=4096):
         super().__init__()
         self.num_layers = num_layers
 
         self.embedding = TokenEmbedding(vocab_size, d_model)
         self.decoder_blocks = nn.ModuleList([
-            DecoderBlock(d_model, num_heads, d_ff, dropout)
+            DecoderBlock(d_model, num_heads, d_ff, dropout, max_seq_len=max_seq_len)
             for _ in range(num_layers)
         ])
 
@@ -1071,6 +1079,9 @@ def main():
         d_ff=D_FF,
         num_layers=NUM_LAYERS,
         dropout=DROPOUT,
+        # Buffer mindestens so gross wie die Trainingslaenge — sonst wuerde
+        # RoPE beim ersten Batch out-of-range greifen.
+        max_seq_len=max(ROPE_MAX_SEQ, SEQ_LENGTH),
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Modell: {n_params:,} Parameter")
