@@ -48,20 +48,28 @@ def _env(name, default, cast=str):
 
 
 # int(float(...)): erlaubt "8e9"-Schreibweise in der ENV-Var.
-FINEWEB_TOKENS = int(_env("FINEWEB_TOKENS", 8e9, float))
+FINEWEB_TOKENS = int(_env("FINEWEB_TOKENS", 7e9, float))
 WIKI_TOKENS = int(_env("WIKI_TOKENS", 2e9, float))
+CODE_TOKENS = int(_env("CODE_TOKENS", 1e9, float))
 SHARD_TOKENS = int(_env("SHARD_TOKENS", 1e8, float))
 SHARD_DIR = _env("SHARD_DIR", "shards")
 DOCS_PER_BATCH = 512   # Dokumente pro encode_ordinary_batch-Aufruf
 
-# Quellen-Definitionen. FineWeb2 = qualitaetsgefiltertes, dedupliziertes
-# Web-Deutsch (der moderne Pretraining-Standard); Wikipedia = sauber, aber
-# stilistisch eintoenig. Die Mischung gibt Diversitaet UND Faktendichte.
+# Quellen-Definitionen: (name, token_budget, load_dataset-kwargs, text_feld).
+#   - FineWeb2: qualitaetsgefiltertes, dedupliziertes Web-Deutsch — der
+#     moderne Pretraining-Standard. Diversitaet (Dialog, Anleitung, Erzaehlung).
+#   - Wikipedia: sauber und faktenreich, aber stilistisch eintoenig.
+#   - Python-Code (~10 % des Mixes): Code ist der logisch dichteste Text —
+#     verschachtelte Strukturen, exakte Referenzen. Verbessert nachweislich
+#     auch Sprach-/Struktur-Faehigkeiten UND haelt die Tuer fuer spaetere
+#     Coding-Aufsaetze offen. CODE_TOKENS=0 schaltet die Quelle ab.
 SOURCES = [
     ("fineweb", FINEWEB_TOKENS,
-     dict(path="HuggingFaceFW/fineweb-2", name="deu_Latn", split="train")),
+     dict(path="HuggingFaceFW/fineweb-2", name="deu_Latn", split="train"), "text"),
     ("wiki", WIKI_TOKENS,
-     dict(path="wikimedia/wikipedia", name="20231101.de", split="train")),
+     dict(path="wikimedia/wikipedia", name="20231101.de", split="train"), "text"),
+    ("code", CODE_TOKENS,
+     dict(path="codeparrot/codeparrot-clean", split="train"), "content"),
 ]
 
 
@@ -153,7 +161,8 @@ class ShardWriter:
               f"— gesamt {total:,} Tokens")
 
 
-def build_source(writer, source, target_tokens, ds_kwargs, encoding, eot):
+def build_source(writer, source, target_tokens, ds_kwargs, encoding, eot,
+                 text_key="text"):
     done_tokens, done_docs = writer.source_progress(source)
     if done_tokens >= target_tokens:
         print(f"[{source}] bereits fertig ({done_tokens:,} Tokens) — skip")
@@ -189,7 +198,7 @@ def build_source(writer, source, target_tokens, ds_kwargs, encoding, eot):
         writer.flush_if_full(source)
 
     for doc in ds:
-        batch.append(doc["text"])
+        batch.append(doc[text_key])
         if len(batch) >= DOCS_PER_BATCH:
             process(batch)
             batch = []
@@ -217,15 +226,16 @@ def main():
     encoding = tiktoken.get_encoding("gpt2")
     eot = encoding.eot_token  # <|endoftext|>, ID 50256
 
-    planned = sum(t for _, t, _ in SOURCES)
+    planned = sum(t for _, t, _, _ in SOURCES)
     print(f"Plan: {planned:,} Tokens -> ~{planned * 2 / 1024**3:.1f} GB "
           f"in '{SHARD_DIR}/' (uint16)")
 
     writer = ShardWriter(SHARD_DIR, SHARD_TOKENS)
-    for source, target, ds_kwargs in SOURCES:
+    for source, target, ds_kwargs, text_key in SOURCES:
         if target <= 0:
             continue
-        build_source(writer, source, target, ds_kwargs, encoding, eot)
+        build_source(writer, source, target, ds_kwargs, encoding, eot,
+                     text_key=text_key)
 
     total = sum(s["num_tokens"] for s in writer.manifest["shards"])
     print(f"\nFertig: {total:,} Tokens in {len(writer.manifest['shards'])} Shards.")

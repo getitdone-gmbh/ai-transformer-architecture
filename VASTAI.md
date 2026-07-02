@@ -99,13 +99,19 @@ scp -P <PORT> root@<HOST>:~/transformer-test/checkpoint_epoch_1.pt ./checkpoint_
 Danach die Vast.ai-Instanz **zerstören** (nicht nur stoppen), sonst laufen
 Kosten weiter.
 
-## Stufe 3: Der 350M-Hauptlauf (~10 Mrd. Tokens)
+## Stufe 3: Der Hauptlauf — 540M auf ~10 Mrd. Tokens
 
-Nach erfolgreicher 124M-Generalprobe. Andere Dimensionen als oben:
+Nach erfolgreicher 124M-Generalprobe. Zwei Wege:
 
-- **Instanz:** RTX 4090, aber **Disk auf 100 GB** (Shards ~20 GB + HF-Cache
-  + Checkpoints à ~4 GB) und auf **Reliability > 99 %** achten — der Lauf
-  dauert **4–6 Tage**. Kosten grob 40–60 $.
+| GPU | Dauer | Kosten | Wann |
+|---|---|---|---|
+| **H100 80GB** (empfohlen) | ~1–1,5 Tage | ~55–70 $ | 540M lastet sie aus — pro FLOP guenstiger als 4090, und 8x weniger Zeit auf einem Marktplatz-Host |
+| RTX 4090 | ~7–8 Tage | ~65–75 $ | nur wenn keine H100 verfuegbar; in run_500m.sh BATCH_SIZE=6 GRAD_ACCUM_STEPS=10 setzen |
+
+- **Disk: 100 GB** (Shards ~20 GB + HF-Cache + Checkpoints à ~6 GB),
+  **Reliability > 99 %**, gutes Netz (Shards-Bau streamt ~50 GB).
+- **Daten-Mix (Default):** 7 Mrd. FineWeb2-Deutsch + 2 Mrd. Wikipedia +
+  1 Mrd. Python-Code. Reines Deutsch: `CODE_TOKENS=0 FINEWEB_TOKENS=8e9`.
 - **Ablauf auf der Instanz:**
 
 ```bash
@@ -113,14 +119,16 @@ git clone <REPO> && cd transformer-test
 bash vastai_setup.sh
 
 # 1. Daten bauen (einmalig, mehrere Stunden — laeuft auf den CPU-Kernen):
-#    ~8 Mrd. Tokens FineWeb2-Deutsch + ~2 Mrd. Wikipedia -> shards/ (~20 GB)
 nohup python prepare_data.py > prepare.log 2>&1 &
 tail -f prepare.log
 
 # 2. Training starten (erst wenn prepare fertig ist):
-nohup bash run_350m.sh > /dev/null 2>&1 &
-tail -f train_350m.log
+nohup bash run_500m.sh > /dev/null 2>&1 &
+tail -f train_500m.log
 ```
+
+(run_350m.sh existiert weiter als kleinere Alternative: GPT-2-medium-
+Shape auf denselben Shards, passt auf eine 4090 in 4–6 Tagen.)
 
 - `prepare_data.py` hat **Resume**: bricht der Job ab, einfach neu starten —
   fertige Shards bleiben, der Stream wird vorgespult.
