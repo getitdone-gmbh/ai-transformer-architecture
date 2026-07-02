@@ -71,7 +71,13 @@ def main():
 
                     step = ckpt.get("global_step", 0)
                     if step != last_step:
-                        emb = ckpt["model_state_dict"]["embedding.embedding.weight"]
+                        sd = ckpt["model_state_dict"]
+                        # torch.compile praefixt alle Keys mit '_orig_mod.'.
+                        # Beide Varianten unterstuetzen.
+                        key = "embedding.embedding.weight"
+                        if key not in sd:
+                            key = "_orig_mod.embedding.embedding.weight"
+                        emb = sd[key]
                         selected = emb[top_ids].clone()  # [TOP_N, d_model]
                         out_path = os.path.join(SNAPSHOT_DIR, f"step_{step:08d}.pt")
                         torch.save({

@@ -81,10 +81,10 @@ def main():
     _, _, V = torch.pca_lowrank(centered, q=3)
     basis = V[:, :3]                                     # [d_model, 3]
 
-    # Erklaerte Varianz (sanity-check)
-    eigvals = ((centered @ basis) ** 2).mean(0)
-    total_var = (centered ** 2).mean()
-    explained = (eigvals.sum() / total_var * 100).item()
+    # Erklaerte Varianz: summe der quadrierten Projektionen vs. summe
+    # der quadrierten zentrierten Originale.
+    projected_final = centered @ basis
+    explained = ((projected_final ** 2).sum() / (centered ** 2).sum() * 100).item()
     print(f"  Top-3 PCA-Achsen erklaeren {explained:.1f}% der Varianz im finalen Snapshot.")
 
     # Alle Snapshots projizieren — mit derselben Basis

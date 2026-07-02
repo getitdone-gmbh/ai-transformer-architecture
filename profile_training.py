@@ -15,9 +15,9 @@ import torch.nn as nn
 
 from train import (
     GPTDecoder,
-    create_causal_mask,
+    configure_optimizer,
     D_MODEL, NUM_HEADS, D_FF, NUM_LAYERS, DROPOUT,
-    BATCH_SIZE, SEQ_LENGTH, LEARNING_RATE,
+    BATCH_SIZE, SEQ_LENGTH, LEARNING_RATE, WEIGHT_DECAY,
 )
 
 VOCAB_SIZE = 50257
@@ -31,20 +31,19 @@ def main():
 
     model = GPTDecoder(VOCAB_SIZE, D_MODEL, NUM_HEADS, D_FF, NUM_LAYERS, DROPOUT).to(device)
     model = torch.compile(model)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = configure_optimizer(model, LEARNING_RATE, WEIGHT_DECAY)
     criterion = nn.CrossEntropyLoss()
 
-    # Inputs simulieren
+    # Inputs simulieren (Causal-Maskierung passiert im SDPA-Kernel selbst)
     x = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE, SEQ_LENGTH), device=device)
     target = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE * SEQ_LENGTH,), device=device)
-    mask = create_causal_mask(SEQ_LENGTH, device)
 
     # Warmup — laesst torch.compile JIT-Kompilieren
     print(f"\nWarmup ({NUM_WARMUP} Batches, kompiliert)...")
     t0 = time.time()
     for i in range(NUM_WARMUP):
         optimizer.zero_grad()
-        logits = model(x, mask)
+        logits = model(x)
         loss = criterion(logits.view(-1, VOCAB_SIZE), target)
         loss.backward()
         optimizer.step()
@@ -56,7 +55,7 @@ def main():
     t0 = time.time()
     for _ in range(NUM_PROFILE):
         optimizer.zero_grad()
-        logits = model(x, mask)
+        logits = model(x)
         loss = criterion(logits.view(-1, VOCAB_SIZE), target)
         loss.backward()
         optimizer.step()
@@ -74,7 +73,7 @@ def main():
     ) as prof:
         for _ in range(NUM_PROFILE):
             optimizer.zero_grad()
-            logits = model(x, mask)
+            logits = model(x)
             loss = criterion(logits.view(-1, VOCAB_SIZE), target)
             loss.backward()
             optimizer.step()
