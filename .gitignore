@@ -42,3 +42,6 @@ embedding_animation.html
 
 # Token-Shards (prepare_data.py Output, viele GB)
 shards/
+
+# Node
+terminal/node_modules/
