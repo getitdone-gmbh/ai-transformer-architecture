@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Die Setzmaschine — ein selbstgebautes Sprachmodell</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,900&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --papier: #f4efe4;
+    --papier-tief: #ece5d4;
+    --tinte: #211c14;
+    --tinte-blass: #6f6555;
+    --rubrik: #b5311c;
+    --linie: #c9bfa9;
+    --serif: "Fraunces", Georgia, serif;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background:
+      radial-gradient(ellipse 120% 60% at 50% -10%, #fbf7ee 0%, transparent 60%),
+      var(--papier);
+    color: var(--tinte);
+    font-family: var(--mono);
+    font-size: 15px;
+    line-height: 1.65;
+    min-height: 100vh;
+  }
+  /* Papierkorn */
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 1;
+  }
+  main { position: relative; z-index: 2; max-width: 780px; margin: 0 auto; padding: 3.5rem 1.5rem 5rem; }
+
+  /* ————— Kopf ————— */
+  header { border-bottom: 3px double var(--tinte); padding-bottom: 1.75rem; margin-bottom: 2.5rem; }
+  .vorspann {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 0.72rem; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--tinte-blass); margin-bottom: 1.2rem;
+  }
+  .vorspann .rot { color: var(--rubrik); font-weight: 500; }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 900;
+    font-size: clamp(2.6rem, 8vw, 4.4rem);
+    line-height: 0.95;
+    letter-spacing: -0.02em;
+  }
+  h1 .punkt { color: var(--rubrik); }
+  .untertitel {
+    font-family: var(--serif); font-weight: 400; font-style: italic;
+    font-size: 1.05rem; color: var(--tinte-blass); margin-top: 0.9rem;
+  }
+
+  /* Spezimen-Zeile: Fakten wie auf einem Schriftmusterblatt */
+  .spezimen {
+    display: flex; flex-wrap: wrap; gap: 0 2.2rem;
+    margin: 1.4rem 0 0; font-size: 0.78rem; color: var(--tinte-blass);
+  }
+  .spezimen b { color: var(--tinte); font-weight: 500; }
+
+  /* ————— Hinweis ————— */
+  .hinweis {
+    border-left: 3px solid var(--rubrik);
+    padding: 0.65rem 1rem;
+    background: var(--papier-tief);
+    font-size: 0.82rem;
+    margin-bottom: 2.4rem;
+  }
+  .hinweis b { color: var(--rubrik); }
+
+  /* ————— Eingabe ————— */
+  label {
+    display: block; font-size: 0.72rem; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--tinte-blass); margin-bottom: 0.6rem;
+  }
+  .eingabe { display: flex; gap: 0.8rem; align-items: stretch; }
+  textarea {
+    flex: 1;
+    font-family: var(--mono); font-size: 1rem; color: var(--tinte);
+    background: transparent;
+    border: none; border-bottom: 2px solid var(--tinte);
+    padding: 0.4rem 0.2rem; resize: none; outline: none;
+    line-height: 1.5;
+  }
+  textarea::placeholder { color: var(--linie); }
+  textarea:focus { border-bottom-color: var(--rubrik); }
+
+  button {
+    font-family: var(--mono); font-size: 0.8rem; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--papier); background: var(--tinte);
+    border: none; padding: 0.75rem 1.4rem; cursor: pointer;
+    transition: background 0.15s, transform 0.05s;
+    align-self: flex-end;
+  }
+  button:hover { background: var(--rubrik); }
+  button:active { transform: translateY(1px); }
+  button:disabled { background: var(--linie); cursor: wait; }
+
+  /* Setzproben */
+  .proben { margin-top: 1.1rem; font-size: 0.82rem; color: var(--tinte-blass); }
+  .proben span { margin-right: 0.4rem; }
+  .probe {
+    color: var(--tinte); text-decoration: underline;
+    text-decoration-color: var(--rubrik); text-underline-offset: 3px;
+    cursor: pointer; margin-right: 1rem; white-space: nowrap;
+  }
+  .probe:hover { color: var(--rubrik); }
+
+  /* ————— Ausgabe: das gesetzte Blatt ————— */
+  #blatt {
+    margin-top: 2.6rem;
+    background: #fbf8f0;
+    border: 1px solid var(--linie);
+    box-shadow: 4px 5px 0 rgba(33, 28, 20, 0.08);
+    padding: 2rem 2.2rem 2.4rem;
+    min-height: 9rem;
+    display: none;
+    position: relative;
+  }
+  #blatt.sichtbar { display: block; animation: einzug 0.35s ease-out; }
+  @keyframes einzug { from { opacity: 0; transform: translateY(8px); } }
+  #blatt::before {
+    content: "SATZ Nº " attr(data-nr);
+    position: absolute; top: -0.62rem; left: 1.4rem;
+    background: var(--rubrik); color: var(--papier);
+    font-size: 0.62rem; letter-spacing: 0.22em; padding: 0.15rem 0.6rem;
+  }
+  #text { font-size: 1.02rem; white-space: pre-wrap; word-wrap: break-word; }
+  #text .prompt { font-weight: 500; background: rgba(181, 49, 28, 0.09); }
+  .caret {
+    display: inline-block; width: 0.55em; height: 1.1em;
+    background: var(--rubrik); vertical-align: text-bottom;
+    animation: blink 0.9s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  #stats {
+    margin-top: 1.3rem; padding-top: 0.8rem;
+    border-top: 1px dashed var(--linie);
+    font-size: 0.72rem; color: var(--tinte-blass); letter-spacing: 0.08em;
+  }
+  .fehler { color: var(--rubrik); }
+
+  /* ————— Fuß ————— */
+  footer {
+    margin-top: 3.5rem; padding-top: 1.2rem;
+    border-top: 1px solid var(--linie);
+    font-size: 0.72rem; color: var(--tinte-blass); line-height: 1.8;
+  }
+  footer a { color: inherit; }
+
+  @media (max-width: 540px) {
+    .eingabe { flex-direction: column; }
+    button { align-self: stretch; }
+    #blatt { padding: 1.4rem 1.2rem 1.8rem; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="vorspann">
+      <span>Werkstattstück · Deutsch</span>
+      <span class="rot" id="modellgroesse">— M Parameter</span>
+    </div>
+    <h1>Die Setzmaschine<span class="punkt">.</span></h1>
+    <p class="untertitel">Ein Sprachmodell, von Hand gebaut und von Grund auf trainiert — kein fremdes Modell, keine fremde API.</p>
+    <div class="spezimen" id="spezimen">
+      <span>Architektur <b>GPT-Decoder</b></span>
+      <span>Schichten <b id="sp-layer">–</b></span>
+      <span>Köpfe <b id="sp-heads">–</b></span>
+      <span>Training <b>dt. Wikipedia + Web + Code</b></span>
+    </div>
+  </header>
+
+  <div class="hinweis">
+    <b>Zur Einordnung:</b> Dies ist ein <b>Basismodell</b> — es beantwortet keine Fragen,
+    es <em>schreibt Text weiter</em>. Gib einen Satzanfang vor. Und: Es erfindet Fakten
+    munter dazu. Das ist bei dieser Größe keine Schwäche, sondern Physik.
+  </div>
+
+  <label for="prompt">Satzanfang setzen</label>
+  <div class="eingabe">
+    <textarea id="prompt" rows="2" maxlength="500"
+      placeholder="Die Hauptstadt von Frankreich"></textarea>
+    <button id="los">Weiterschreiben</button>
+  </div>
+  <div class="proben">
+    <span>Setzproben:</span><!--
+    --><a class="probe">Die Geschichte der Stadt</a><!--
+    --><a class="probe">Ein Vulkan ist</a><!--
+    --><a class="probe">Im Jahr 1989</a><!--
+    --><a class="probe">def fibonacci(n):</a>
+  </div>
+
+  <div id="blatt" data-nr="1">
+    <div id="text"></div>
+    <div id="stats"></div>
+  </div>
+
+  <footer>
+    Gebaut als Lernprojekt: Transformer, Training und diese Seite aus eigener Hand.
+    Quellcode auf <a href="https://github.com/b3rtram/transformer-test">GitHub</a>.
+    Läuft auf CPU — eine Generierung dauert einige Sekunden. Nº zählt die Sätze dieser Sitzung.
+  </footer>
+</main>
+
+<script>
+  const els = {
+    prompt: document.getElementById("prompt"),
+    los: document.getElementById("los"),
+    blatt: document.getElementById("blatt"),
+    text: document.getElementById("text"),
+    stats: document.getElementById("stats"),
+  };
+  let satzNr = 0;
+
+  fetch("/info").then(r => r.json()).then(i => {
+    document.getElementById("modellgroesse").textContent = `${i.params_mio} M Parameter`;
+    document.getElementById("sp-layer").textContent = i.num_layers;
+    document.getElementById("sp-heads").textContent = i.num_heads;
+  }).catch(() => {});
+
+  document.querySelectorAll(".probe").forEach(a => {
+    a.addEventListener("click", () => {
+      els.prompt.value = a.textContent;
+      los();
+    });
+  });
+
+  els.prompt.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); los(); }
+  });
+  els.los.addEventListener("click", los);
+
+  async function los() {
+    const prompt = els.prompt.value.trim();
+    if (!prompt || els.los.disabled) return;
+
+    els.los.disabled = true;
+    els.los.textContent = "setzt …";
+    els.blatt.classList.add("sichtbar");
+    els.blatt.dataset.nr = ++satzNr;
+    els.text.innerHTML = `<span class="prompt"></span><span class="fort"></span><span class="caret"></span>`;
+    els.text.querySelector(".prompt").textContent = prompt;
+    els.stats.textContent = "Die Maschine setzt — auf CPU dauert das einen Moment …";
+
+    try {
+      const res = await fetch("/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText);
+      const data = await res.json();
+
+      // Tipp-Effekt: die Fortsetzung Zeichen für Zeichen einlaufen lassen
+      const ziel = els.text.querySelector(".fort");
+      const zeichen = [...data.continuation];
+      let i = 0;
+      await new Promise(done => {
+        (function tick() {
+          if (i < zeichen.length) {
+            ziel.textContent += zeichen[i++];
+            setTimeout(tick, 14);
+          } else done();
+        })();
+      });
+      els.text.querySelector(".caret").remove();
+      els.stats.textContent =
+        `${data.seconds} s · ${data.tokens_per_s} Tokens/s · Temperatur 0,8 · top-p 0,9`;
+    } catch (err) {
+      els.text.querySelector(".caret")?.remove();
+      els.stats.innerHTML = `<span class="fehler">Setzfehler: ${err.message}</span>`;
+    } finally {
+      els.los.disabled = false;
+      els.los.textContent = "Weiterschreiben";
+    }
+  }
+</script>
+</body>
+</html>
