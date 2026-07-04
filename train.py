@@ -670,7 +670,8 @@ class GPTDecoder(nn.Module):
 
     @torch.no_grad()
     def generate(self, input_ids, max_new_tokens=50, temperature=1.0,
-                 top_k=None, top_p=None, repetition_penalty=1.0):
+                 top_k=None, top_p=None, repetition_penalty=1.0,
+                 eos_token_id=None):
         """Autoregressives Sampling mit modernen Decoding-Strategien.
 
         temperature: skaliert Logits vor Softmax. <1 schaerfer, >1 flacher.
@@ -680,6 +681,10 @@ class GPTDecoder(nn.Module):
         repetition_penalty:
                      >1.0 reduziert die Wahrscheinlichkeit von Tokens, die
                      bereits im Kontext sind (gegen "Stadt im Stadt im Stadt").
+        eos_token_id: stoppt die Generierung, sobald dieses Token gesampelt
+                     wird (Batch=1). Ein Basismodell produziert es praktisch
+                     nie — erst das SFT bringt dem Modell bei, "fertig" zu
+                     signalisieren. Deshalb ist der Parameter optional.
 
         Reihenfolge: rep_penalty -> /temperature -> top_k -> top_p -> sample.
         """
@@ -735,6 +740,9 @@ class GPTDecoder(nn.Module):
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             input_ids = torch.cat([input_ids, next_token], dim=1)
+            if (eos_token_id is not None and input_ids.size(0) == 1
+                    and next_token.item() == eos_token_id):
+                break
         if was_training:
             self.train()
         return input_ids

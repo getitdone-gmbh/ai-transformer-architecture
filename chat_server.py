@@ -36,6 +36,12 @@ PORT = int(os.environ.get("PORT", "8123"))
 DEFAULTS = dict(max_new_tokens=80, temperature=0.8, top_p=0.9,
                 repetition_penalty=1.2)
 
+# Chat-Modus (CHAT_TEMPLATE=1): fuer SFT-Checkpoints. Wickelt die Eingabe
+# in das Trainings-Template und stoppt am <|endoftext|>. Beim Basismodell
+# aus lassen — es kennt weder das Template noch das Aufhoeren.
+CHAT_TEMPLATE = os.environ.get("CHAT_TEMPLATE", "0").lower() in ("1", "true")
+PROMPT_TMPL = "### Frage:\n{frage}\n\n### Antwort:\n"
+
 
 def load_model():
     device = train.get_device()
@@ -96,7 +102,9 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, ValueError, json.JSONDecodeError) as e:
             return self._send(400, {"error": f"kaputte Anfrage: {e}"})
 
-        ids = torch.tensor([ENC.encode(prompt)], device=DEVICE)
+        model_input = (PROMPT_TMPL.format(frage=prompt)
+                       if CHAT_TEMPLATE else prompt)
+        ids = torch.tensor([ENC.encode(model_input)], device=DEVICE)
         t0 = time.time()
         out = MODEL.generate(
             ids,
@@ -104,11 +112,17 @@ class Handler(BaseHTTPRequestHandler):
             temperature=opts["temperature"],
             top_p=opts["top_p"],
             repetition_penalty=opts["repetition_penalty"],
+            eos_token_id=ENC.eot_token if CHAT_TEMPLATE else None,
         )
         seconds = time.time() - t0
         new_tokens = out.size(1) - ids.size(1)
+        text = ENC.decode(out[0].cpu().tolist())
+        if CHAT_TEMPLATE:
+            # Nur die Antwort zurueckgeben, ohne Template und EOT.
+            text = (text[len(model_input):]
+                    .replace("<|endoftext|>", "").strip())
         self._send(200, {
-            "text": ENC.decode(out[0].cpu().tolist()),
+            "text": text,
             "seconds": round(seconds, 2),
             "tokens_per_s": round(new_tokens / max(seconds, 1e-9), 1),
         })
