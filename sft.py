@@ -51,10 +51,16 @@ from contextlib import nullcontext
 WEIGHTS = _env("WEIGHTS", "weights_540m_fp32.pt", str)
 OUT_PATH = _env("OUT_PATH", "sft_540m.pt", str)
 DATASET = _env("DATASET", "FreedomIntelligence/alpaca-gpt4-deutsch", str)
+                                       # mehrere Datensaetze: kommagetrennt
 LIMIT = _env("LIMIT", 0, int)          # 0 = alle Beispiele; >0 fuer Smoke-Tests
-MAX_LEN = _env("MAX_LEN", 512, int)    # Beispiele laenger als das: abgeschnitten
-BATCH_SIZE = _env("BATCH_SIZE", 8, int)
-GRAD_ACCUM = _env("GRAD_ACCUM", 4, int)     # effektiv 8*4 = 32 Beispiele/Step
+MAX_LEN = _env("MAX_LEN", 512, int)    # Beispiele laenger als das: VERWORFEN
+                                       # (nicht abgeschnitten — sonst verliert
+                                       # die Antwort ihr <|endoftext|> und wir
+                                       # trainieren Aufhoeren mitten im Satz ab)
+BATCH_SIZE = _env("BATCH_SIZE", 4, int)     # klein halten: die Logits + CE
+                                            # ([B*T, 50257] in fp32) sind der
+                                            # Speicher-Peak jedes Steps
+GRAD_ACCUM = _env("GRAD_ACCUM", 8, int)     # effektiv 4*8 = 32 Beispiele/Step
 EPOCHS = _env("EPOCHS", 2, int)             # bis ~4 Epochen ok (Muennighoff)
 LEARNING_RATE = _env("LEARNING_RATE", 2e-5, float)
 MIN_LR = _env("MIN_LR", 2e-6, float)
@@ -84,7 +90,7 @@ class InstructDataset(Dataset):
         self.enc = enc
         self.max_len = max_len
         self.items = []
-        skipped = 0
+        skipped = too_long = 0
         for ex in examples:
             conv = ex["conversations"]
             # Nur das erste Frage-Antwort-Paar (Datensatz ist fast
@@ -94,14 +100,18 @@ class InstructDataset(Dataset):
                 continue
             prompt = PROMPT_TMPL.format(frage=conv[0]["value"].strip())
             answer = conv[1]["value"].strip()
-            p_ids = enc.encode(prompt)
-            a_ids = enc.encode(answer) + [enc.eot_token]
-            ids = (p_ids + a_ids)[:max_len]
-            n_prompt = min(len(p_ids), max_len)
-            self.items.append((ids, n_prompt))
+            p_ids = enc.encode(prompt, disallowed_special=())
+            a_ids = enc.encode(answer, disallowed_special=()) + [enc.eot_token]
+            ids = p_ids + a_ids
+            if len(ids) > max_len:
+                too_long += 1
+                continue
+            self.items.append((ids, len(p_ids)))
         self.items.sort(key=lambda it: len(it[0]))
         if skipped:
             print(f"  {skipped} Beispiele uebersprungen (unerwartetes Format)")
+        if too_long:
+            print(f"  {too_long} Beispiele verworfen (laenger als {max_len} Tokens)")
 
     def __len__(self):
         return len(self.items)
@@ -111,8 +121,16 @@ class InstructDataset(Dataset):
 
 
 def collate(batch, pad_id):
-    """Dynamisches Padding auf die Batch-laengste Sequenz + Label-Maske."""
+    """Dynamisches Padding auf die Batch-laengste Sequenz + Label-Maske.
+
+    Die Breite wird auf Vielfache von 64 aufgerundet: MPS/Metal cached
+    Kernels und Puffer PRO TENSOR-FORM. Ohne Buckets erzeugt jede Batch-
+    Breite (20, 21, 23, ...) eigene Cache-Eintraege — der Speicher-Pool
+    fragmentiert und waechst ueber Stunden bis zum OOM. Mit Buckets gibt
+    es bei MAX_LEN=512 nur 8 Formen, die staendig wiederverwendet werden.
+    """
     width = max(len(ids) for ids, _ in batch)
+    width = (width + 63) // 64 * 64
     input_ids = torch.full((len(batch), width), pad_id, dtype=torch.long)
     labels = torch.full((len(batch), width), -100, dtype=torch.long)
     for i, (ids, n_prompt) in enumerate(batch):
@@ -155,8 +173,13 @@ def main():
     n = sum(p.numel() for p in model.parameters())
     print(f"Basis geladen: {WEIGHTS} ({n / 1e6:.0f}M Parameter)")
 
-    # --- Daten ---
-    ds = load_dataset(DATASET, split="train")
+    # --- Daten (mehrere Datensaetze im selben conversations-Format
+    # werden einfach aneinandergehaengt; die Laengen-Sortierung im
+    # Dataset mischt sie dann ohnehin durch) ---
+    from datasets import concatenate_datasets
+    parts = [load_dataset(n.strip(), split="train")
+             for n in DATASET.split(",") if n.strip()]
+    ds = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
     if LIMIT:
         ds = ds.select(range(min(LIMIT, len(ds))))
     print(f"Datensatz: {DATASET} ({len(ds):,} Beispiele)")
@@ -221,6 +244,11 @@ def main():
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
+                # MPS gibt gecachte Puffer nie von selbst zurueck; ohne
+                # das hier waechst der Pool ueber Stunden monoton (der
+                # naechtliche OOM). Kostet ~ms, rettet das Training.
+                if device.type == "mps" and global_step % 25 == 0:
+                    torch.mps.empty_cache()
                 if global_step % 20 == 0:
                     rate = (bi + 1) * BATCH_SIZE / (time.time() - t0)
                     print(f"  Step {global_step}/{max_steps}, "
