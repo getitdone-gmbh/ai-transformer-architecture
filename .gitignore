@@ -29,9 +29,9 @@ wheels/
 .DS_Store
 Thumbs.db
 
-# Training logs
+# Logs (Training, SFT, Chat-Server, ...)
 logs/
-train.log
+*.log
 
 # Tokenization cache
 data_cache/

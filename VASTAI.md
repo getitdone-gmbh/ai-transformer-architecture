@@ -99,45 +99,6 @@ scp -P <PORT> root@<HOST>:~/transformer-test/checkpoint_epoch_1.pt ./checkpoint_
 Danach die Vast.ai-Instanz **zerstören** (nicht nur stoppen), sonst laufen
 Kosten weiter.
 
-## Stufe 3: Der Hauptlauf — 540M auf ~10 Mrd. Tokens
-
-Nach erfolgreicher 124M-Generalprobe. Zwei Wege:
-
-| GPU | Dauer | Kosten | Wann |
-|---|---|---|---|
-| **H100 80GB** (empfohlen) | ~1–1,5 Tage | ~55–70 $ | 540M lastet sie aus — pro FLOP guenstiger als 4090, und 8x weniger Zeit auf einem Marktplatz-Host |
-| RTX 4090 | ~7–8 Tage | ~65–75 $ | nur wenn keine H100 verfuegbar; in run_500m.sh BATCH_SIZE=6 GRAD_ACCUM_STEPS=10 setzen |
-
-- **Disk: 100 GB** (Shards ~20 GB + HF-Cache + Checkpoints à ~6 GB),
-  **Reliability > 99 %**, gutes Netz (Shards-Bau streamt ~50 GB).
-- **Daten-Mix (Default):** 7 Mrd. FineWeb2-Deutsch + 2 Mrd. Wikipedia +
-  1 Mrd. Python-Code. Reines Deutsch: `CODE_TOKENS=0 FINEWEB_TOKENS=8e9`.
-- **Ablauf auf der Instanz:**
-
-```bash
-git clone <REPO> && cd transformer-test
-bash vastai_setup.sh
-
-# 1. Daten bauen (einmalig, mehrere Stunden — laeuft auf den CPU-Kernen):
-nohup python prepare_data.py > prepare.log 2>&1 &
-tail -f prepare.log
-
-# 2. Training starten (erst wenn prepare fertig ist):
-nohup bash run_500m.sh > /dev/null 2>&1 &
-tail -f train_500m.log
-```
-
-(run_350m.sh existiert weiter als kleinere Alternative: GPT-2-medium-
-Shape auf denselben Shards, passt auf eine 4090 in 4–6 Tagen.)
-
-- `prepare_data.py` hat **Resume**: bricht der Job ab, einfach neu starten —
-  fertige Shards bleiben, der Stream wird vorgespult.
-- Das Training schreibt alle 2000 Steps `checkpoint_latest.pt` — bei einem
-  Host-Ausfall gehen maximal ~30 Minuten verloren (`AUTO_RESUME` laedt den
-  letzten Stand; Instanz neu mieten, Shards muessen dann allerdings neu
-  gebaut werden, ausser man sichert sie vorher per scp/Cloud).
-- Checkpoint am Ende ist ~4 GB — Rueckholen per scp dauert entsprechend.
-
 ## 7. Weiter geht's lokal
 
 Mit `checkpoint_124m.pt` können wir dann auf dem Mac die eigentlich spannenden

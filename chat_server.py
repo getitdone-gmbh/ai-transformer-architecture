@@ -6,7 +6,7 @@ im Speicher — die Terminal-UI kann beliebig oft neu starten und fragt nur
 per HTTP an. Bewusst nur Python-Stdlib (http.server), keine neuen Deps.
 
 Start:
-    python chat_server.py                          # nimmt checkpoint_epoch_1.pt
+    CHAT_TEMPLATE=1 python chat_server.py          # nimmt sft_540m_v2.pt
     CHECKPOINT=andere_datei.pt python chat_server.py
 
 Endpunkte:
@@ -29,7 +29,7 @@ import torch
 
 import train
 
-CHECKPOINT = os.environ.get("CHECKPOINT", "checkpoint_epoch_1.pt")
+CHECKPOINT = os.environ.get("CHECKPOINT", "sft_540m_v2.pt")
 PORT = int(os.environ.get("PORT", "8123"))
 
 # Sampling-Defaults — die UI kann jeden Wert pro Anfrage ueberschreiben.
