@@ -1,12 +1,13 @@
 /**
- * Mini-Chat-Terminal für das eigene Modell (Ink = React fürs Terminal).
+ * Mini chat terminal for our own model (Ink = React for the terminal).
  *
- * Voraussetzung: der Inferenz-Server läuft →  python chat_server.py
- * Start:                                      npm start
+ * Prerequisite: the inference server is running →  python chat_server.py
+ * Start:                                           npm start
  *
- * Das Modell ist ein BASISMODELL: es setzt Text fort, es antwortet nicht.
- * Prompts also als Satzanfänge formulieren ("Die Hauptstadt von Frankreich"),
- * nicht als Fragen — bis die SFT-Version da ist. ;)
+ * The model is a BASE MODEL: it continues text, it does not answer.
+ * So phrase prompts as sentence openers ("Die Hauptstadt von Frankreich" —
+ * the model only speaks German), not as questions — until the SFT version
+ * arrives. ;)
  */
 import React, { useEffect, useState } from 'react';
 import { render, Box, Text, useApp, useInput } from 'ink';
@@ -23,13 +24,13 @@ function App() {
 	const [history, setHistory] = useState([]); // {prompt, text, stats | error}
 	const [busy, setBusy] = useState(false);
 
-	// Modell-Info beim Start holen — dient gleichzeitig als Server-Check.
+	// Fetch model info on startup — doubles as a server health check.
 	useEffect(() => {
 		fetch(`${SERVER}/info`)
 			.then((r) => r.json())
 			.then(setInfo)
 			.catch(() => setInfoError(
-				`Kein Server unter ${SERVER} — erst starten: python chat_server.py`,
+				`No server at ${SERVER} — start it first: python chat_server.py`,
 			));
 	}, []);
 
@@ -67,19 +68,19 @@ function App() {
 			<Box borderStyle="round" borderColor="cyan" paddingX={1}>
 				<Text color="cyan" bold>
 					{info
-						? `Dein Modell · ${mio}M Parameter · ${info.device} · ${info.checkpoint}`
-						: infoError ?? 'Verbinde mit Server...'}
+						? `Your model · ${mio}M parameters · ${info.device} · ${info.checkpoint}`
+						: infoError ?? 'Connecting to server...'}
 				</Text>
 			</Box>
 
 			{history.map((entry, i) => (
 				<Box key={i} flexDirection="column" marginTop={1}>
-					<Text color="yellow" bold>{'Du     › '}<Text color="white">{entry.prompt}</Text></Text>
+					<Text color="yellow" bold>{'You    › '}<Text color="white">{entry.prompt}</Text></Text>
 					{entry.error
-						? <Text color="red">Fehler: {entry.error}</Text>
+						? <Text color="red">Error: {entry.error}</Text>
 						: (
 							<>
-								<Text color="green" bold>{'Modell › '}<Text color="white">{entry.text}</Text></Text>
+								<Text color="green" bold>{'Model  › '}<Text color="white">{entry.text}</Text></Text>
 								<Text dimColor>         {entry.stats}</Text>
 							</>
 						)}
@@ -88,15 +89,15 @@ function App() {
 
 			<Box marginTop={1}>
 				{busy ? (
-					<Text color="green"><Spinner type="dots" /> generiert...</Text>
+					<Text color="green"><Spinner type="dots" /> generating...</Text>
 				) : (
 					<>
-						<Text color="yellow" bold>{'Du     › '}</Text>
+						<Text color="yellow" bold>{'You    › '}</Text>
 						<TextInput
 							value={input}
 							onChange={setInput}
 							onSubmit={submit}
-							placeholder="Satzanfang eingeben (Enter sendet, Esc beendet)"
+							placeholder="Type a sentence opener in German (Enter sends, Esc quits)"
 						/>
 					</>
 				)}
@@ -106,7 +107,7 @@ function App() {
 }
 
 if (!process.stdin.isTTY) {
-	console.error('Braucht ein echtes Terminal (TTY) — bitte direkt in der Shell starten.');
+	console.error('Needs a real terminal (TTY) — please run it directly from the shell.');
 	process.exit(1);
 }
 render(<App />);

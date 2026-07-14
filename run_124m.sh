@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Startet den 124M-Trainingslauf. Alle Knoepfe explizit als ENV-Vars, damit
-# der Lauf reproduzierbar ist und man sie leicht anpassen kann (siehe VASTAI.md).
+# Starts the 124M training run. All knobs are explicit ENV vars so the run
+# is reproducible and easy to tweak (see VASTAI.md).
 #
-# Bei "CUDA out of memory": BATCH_SIZE runter (z.B. 8) und GRAD_ACCUM_STEPS
-# hoch (z.B. 6), damit die effektive Batch (BATCH_SIZE*GRAD_ACCUM_STEPS) gleich
-# bleibt.
+# On "CUDA out of memory": lower BATCH_SIZE (e.g. 8) and raise GRAD_ACCUM_STEPS
+# (e.g. 6) so the effective batch (BATCH_SIZE*GRAD_ACCUM_STEPS) stays the
+# same.
 set -euo pipefail
 
 D_MODEL=768 NUM_HEADS=12 NUM_LAYERS=12 D_FF=2048 \

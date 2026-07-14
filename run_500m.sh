@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
-# Hauptlauf: ~540M Parameter auf ~10 Mrd. Tokens (FineWeb2 + Wiki + Python).
+# Main run: ~540M parameters on ~10 billion tokens (FineWeb2 + Wiki + Python).
 #
-# VORHER auf der Instanz ausfuehren (einmalig, mehrere Stunden):
+# BEFORE this, run on the instance (once, several hours):
 #   nohup python prepare_data.py > prepare.log 2>&1 &
-#   (Default-Mix: 7 Mrd. FineWeb2-Deutsch + 2 Mrd. Wikipedia + 1 Mrd. Python.
-#    Reines Deutsch: CODE_TOKENS=0 FINEWEB_TOKENS=8e9 python prepare_data.py)
+#   (Default mix: 7B FineWeb2 German + 2B Wikipedia + 1B Python.
+#    German only: CODE_TOKENS=0 FINEWEB_TOKENS=8e9 python prepare_data.py)
 #
-# GPU-Wahl: H100 80GB (empfohlen) — ein 540M-Modell mit grossen Micro-Batches
-# lastet eine H100 gut aus, dann ist sie pro FLOP guenstiger als eine 4090:
-#   H100 80GB:  ~1.5 Tage,  ~60-75 $   <- Standard-Settings unten
-#   RTX 4090:   ~8 Tage,    ~70-80 $   <- BATCH_SIZE=3 GRAD_ACCUM_STEPS=10 setzen
+# GPU choice: H100 80GB (recommended) — a 540M model with large micro-batches
+# keeps an H100 well utilized, and then it is cheaper per FLOP than a 4090:
+#   H100 80GB:  ~1.5 days,  ~$60-75   <- default settings below
+#   RTX 4090:   ~8 days,    ~$70-80   <- set BATCH_SIZE=3 GRAD_ACCUM_STEPS=10
 #
-# Architektur: d_model=1280, 24 Layer, 20 Heads (64-dim Koepfe).
-# D_FF=3456: SwiGLU-Konvention (2/3)*4*1280 ~ 3413, aufgerundet auf ein
-# Vielfaches von 64. Macht zusammen ~540M Parameter.
+# Architecture: d_model=1280, 24 layers, 20 heads (64-dim heads).
+# D_FF=3456: SwiGLU convention (2/3)*4*1280 ~ 3413, rounded up to a
+# multiple of 64. Adds up to ~540M parameters.
 #
-# LR 2.5e-4: je groesser das Modell, desto kleiner die stabile Peak-LR
-# (GPT-3-Tabelle: 760M -> 2.5e-4). DROPOUT=0.0: ein Pass ueber frische
-# Tokens, Overfitting strukturell unmoeglich (siehe run_350m.sh).
+# LR 2.5e-4: the larger the model, the smaller the stable peak LR
+# (GPT-3 table: 760M -> 2.5e-4). DROPOUT=0.0: one pass over fresh
+# tokens, overfitting structurally impossible (see run_350m.sh).
 #
-# SEQ_LENGTH=2048: doppeltes Context Window fuer ~+10 % Rechenzeit — der
-# billigste Kontext, den man je kaufen kann (nachtraeglich = teurer/schlechter).
-# BATCH_SIZE halbiert (16 x 2048 = 32 x 1024 Tokens) -> Tokens/Step identisch,
-# Trainings-Mathematik unveraendert.
+# SEQ_LENGTH=2048: double the context window for ~+10% compute — the
+# cheapest context you will ever buy (retrofitting it later = more
+# expensive/worse). BATCH_SIZE halved (16 x 2048 = 32 x 1024 tokens)
+# -> tokens/step identical, training math unchanged.
 #
-# Effektiv: 16 x 2 = 32 Sequenzen x 2048 Tokens = 65.536 Tokens/Step.
-# 10 Mrd. Tokens -> ~150.000 Steps. Rolling-Checkpoint alle 2000 Steps.
+# Effective: 16 x 2 = 32 sequences x 2048 tokens = 65,536 tokens/step.
+# 10 billion tokens -> ~150,000 steps. Rolling checkpoint every 2000 steps.
 set -euo pipefail
 
 D_MODEL=1280 NUM_HEADS=20 NUM_LAYERS=24 D_FF=3456 \

@@ -1,14 +1,14 @@
-"""Trainings-Checkpoint -> schlanke Inferenz-Gewichte (fp16, weights-only).
+"""Training checkpoint -> lean inference weights (fp16, weights-only).
 
-Ein Trainings-Checkpoint traegt Ballast, den Inferenz nie braucht:
-  - Adam-Zustaende (2 Momente pro Parameter = 2/3 der Dateigroesse!)
-  - fp32-Praezision (fuer Trainings-Stabilitaet noetig, fuer Inferenz nicht)
+A training checkpoint carries baggage that inference never needs:
+  - Adam states (2 moments per parameter = 2/3 of the file size!)
+  - fp32 precision (needed for training stability, not for inference)
 
-Dieser Export wirft beides raus: nur model_state_dict, gecastet auf fp16.
-  124M: ~1,5 GB -> ~250 MB     540M: ~6,5 GB -> ~1,1 GB
+This export throws both out: only model_state_dict, cast to fp16.
+  124M: ~1.5 GB -> ~250 MB     540M: ~6.5 GB -> ~1.1 GB
 
-Die config wandert mit in die Datei, damit der Lade-Code die Architektur
-nicht raten muss (gleiche Idee wie in chat_server.py).
+The config travels along in the file so the loading code does not have
+to guess the architecture (same idea as in chat_server.py).
 
     python export_weights.py checkpoint_epoch_1.pt weights_124m_fp16.pt
 """
@@ -23,7 +23,7 @@ def main():
     ckpt = torch.load(src, map_location="cpu", weights_only=False)
 
     state = {
-        # '_orig_mod.'-Praefix (torch.compile) normalisieren wie ueberall
+        # Normalize the '_orig_mod.' prefix (torch.compile), as everywhere else
         k.removeprefix("_orig_mod."): v.half() if v.is_floating_point() else v
         for k, v in ckpt["model_state_dict"].items()
     }

@@ -1,13 +1,13 @@
-"""Baut aus den Embedding-Snapshots eine 3D-Animation.
+"""Builds a 3D animation from the embedding snapshots.
 
-Alle Snapshots in snapshots/ werden mit derselben PCA-Basis (gerechnet
-auf dem JUENGSTEN Snapshot) auf 3D projiziert. Frame-by-Frame Animation
-zeigt dann wie sich die Embeddings im Training "in den finalen Raum
-bewegen" — von zufaelliger Wolke zu strukturierten Clustern.
+All snapshots in snapshots/ are projected to 3D using the same PCA basis
+(computed on the MOST RECENT snapshot). A frame-by-frame animation then
+shows how the embeddings "move into the final space" during training —
+from a random cloud to structured clusters.
 
-Output: embedding_animation.html (Plotly, interaktiv mit Play-Button).
+Output: embedding_animation.html (Plotly, interactive with a play button).
 
-Aufruf:
+Run:
     uv run python animate_embeddings.py
 """
 
@@ -23,7 +23,7 @@ SNAPSHOT_DIR = "snapshots"
 
 
 def categorize(token_str):
-    """Grobe Kategorisierung fuer Farbcodierung."""
+    """Rough categorization for color coding."""
     s = token_str.strip()
     if not s:
         return "whitespace"
@@ -39,32 +39,34 @@ def categorize(token_str):
 
 
 CATEGORY_COLORS = {
-    "noun_like":  "#1f77b4",  # blau — wahrscheinlich Substantive (gross)
-    "word":       "#2ca02c",  # gruen — wahrscheinlich Verben/Adjektive (klein)
-    "number":     "#d62728",  # rot — reine Zahlen
-    "alphanum":   "#ff7f0e",  # orange — gemischt
-    "punct":      "#9467bd",  # lila — Interpunktion
-    "whitespace": "#cccccc",  # grau
+    # Capitalization is a strong signal here because the corpus is German:
+    # German capitalizes ALL nouns, so uppercase-first tokens are likely nouns.
+    "noun_like":  "#1f77b4",  # blue — likely nouns (capitalized)
+    "word":       "#2ca02c",  # green — likely verbs/adjectives (lowercase)
+    "number":     "#d62728",  # red — pure numbers
+    "alphanum":   "#ff7f0e",  # orange — mixed
+    "punct":      "#9467bd",  # purple — punctuation
+    "whitespace": "#cccccc",  # gray
 }
 
 
 def main():
-    # Snapshots laden
+    # Load snapshots
     paths = sorted(glob.glob(os.path.join(SNAPSHOT_DIR, "step_*.pt")))
     if not paths:
-        raise SystemExit(f"Keine Snapshots in {SNAPSHOT_DIR}/. Sidecar laufen lassen?")
-    print(f"Snapshots gefunden: {len(paths)}")
+        raise SystemExit(f"No snapshots in {SNAPSHOT_DIR}/. Did you run the sidecar?")
+    print(f"Snapshots found: {len(paths)}")
 
     snapshots = [torch.load(p, weights_only=False) for p in paths]
     snapshots.sort(key=lambda s: s["step"])
 
-    # Token-IDs + dekodierte Texte
+    # Token IDs + decoded texts
     token_ids = torch.load(
         os.path.join(SNAPSHOT_DIR, "token_ids.pt"), weights_only=True
     )
     encoding = tiktoken.get_encoding("gpt2")
     token_strs = [encoding.decode([int(tid)]) for tid in token_ids]
-    # Zeilenumbruch / Tabs fuer Hover lesbar machen
+    # Make newlines / tabs readable in the hover text
     display_strs = [
         f"'{s}'" for s in (
             t.replace("\n", "\\n").replace("\t", "\\t") for t in token_strs
@@ -73,37 +75,37 @@ def main():
     categories = [categorize(t) for t in token_strs]
     colors = [CATEGORY_COLORS[c] for c in categories]
 
-    # PCA-Basis vom letzten Snapshot
-    print("Berechne PCA-Basis vom letzten Snapshot...")
+    # PCA basis from the last snapshot
+    print("Computing PCA basis from the last snapshot...")
     final_emb = snapshots[-1]["embeddings"].float()      # [N, d_model]
     mean = final_emb.mean(0)
     centered = final_emb - mean
     _, _, V = torch.pca_lowrank(centered, q=3)
     basis = V[:, :3]                                     # [d_model, 3]
 
-    # Erklaerte Varianz: summe der quadrierten Projektionen vs. summe
-    # der quadrierten zentrierten Originale.
+    # Explained variance: sum of the squared projections vs. sum of the
+    # squared centered originals.
     projected_final = centered @ basis
     explained = ((projected_final ** 2).sum() / (centered ** 2).sum() * 100).item()
-    print(f"  Top-3 PCA-Achsen erklaeren {explained:.1f}% der Varianz im finalen Snapshot.")
+    print(f"  Top 3 PCA axes explain {explained:.1f}% of the variance in the final snapshot.")
 
-    # Alle Snapshots projizieren — mit derselben Basis
-    print("Projiziere alle Snapshots in dieselbe Basis...")
+    # Project all snapshots — with the same basis
+    print("Projecting all snapshots into the same basis...")
     projected = []
     for snap in snapshots:
         emb = snap["embeddings"].float()
         coords = (emb - mean) @ basis                   # [N, 3]
         projected.append(coords)
 
-    # Achsen-Range fest (sonst zoomt Plotly pro Frame anders)
+    # Fixed axis ranges (otherwise Plotly zooms differently per frame)
     all_coords = torch.cat(projected, dim=0)
     margin = 0.1
     x_range = [all_coords[:, 0].min().item() - margin, all_coords[:, 0].max().item() + margin]
     y_range = [all_coords[:, 1].min().item() - margin, all_coords[:, 1].max().item() + margin]
     z_range = [all_coords[:, 2].min().item() - margin, all_coords[:, 2].max().item() + margin]
 
-    # Frames bauen
-    print("Baue Plotly-Frames...")
+    # Build frames
+    print("Building Plotly frames...")
 
     def scatter(coords, snap):
         return go.Scatter3d(
@@ -128,9 +130,9 @@ def main():
 
     fig = go.Figure(data=[initial], frames=frames)
 
-    # Layout: feste Achsen, Play-Button, Slider
+    # Layout: fixed axes, play button, slider
     fig.update_layout(
-        title="Embedding-Entwicklung waehrend des Trainings (PCA-Basis = finaler Stand)",
+        title="Embedding evolution during training (PCA basis = final state)",
         scene=dict(
             xaxis=dict(range=x_range, title="PC1"),
             yaxis=dict(range=y_range, title="PC2"),
@@ -181,7 +183,7 @@ def main():
     fig.write_html(out_path, include_plotlyjs="cdn")
     print(f"\nAnimation: {out_path}")
     print(f"  Frames: {len(snapshots)}")
-    print(f"  Tokens pro Frame: {len(token_ids)}")
+    print(f"  Tokens per frame: {len(token_ids)}")
 
 
 if __name__ == "__main__":

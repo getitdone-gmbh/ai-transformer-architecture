@@ -1,7 +1,7 @@
-"""GPT-Style Transformer fuer deutsche Wikipedia.
+"""GPT-style transformer for German Wikipedia.
 
-Decoder-only Architektur, trainiert mit Causal Language Modeling.
-Laeuft auf MPS (Apple Silicon), CUDA und CPU.
+Decoder-only architecture, trained with causal language modeling.
+Runs on MPS (Apple Silicon), CUDA, and CPU.
 """
 
 import bisect
@@ -23,18 +23,18 @@ from datasets import load_dataset
 
 
 # ============================================================
-# Hyperparameter
+# Hyperparameters
 # ============================================================
 #
-# ALLE zentralen Hyperparameter sind per Umgebungsvariable ueberschreibbar
-# (siehe _env unten). So laeuft derselbe Code lokal klein (schneller Test
-# auf MPS) und auf einer Vast.ai-GPU gross (124M), OHNE die Datei zu
-# editieren — Remote-Runs bleiben damit reproduzierbar und diff-frei.
+# ALL central hyperparameters can be overridden via environment variables
+# (see _env below). That way the same code runs small locally (quick test
+# on MPS) and large on a Vast.ai GPU (124M) WITHOUT editing the file —
+# which keeps remote runs reproducible and diff-free.
 #
-#   Beispiel:  D_MODEL=768 NUM_LAYERS=12 python train.py
+#   Example:  D_MODEL=768 NUM_LAYERS=12 python train.py
 
 def _env(name, default, cast=str):
-    """Liest ENV-Var `name`, castet sie, faellt sonst auf `default` zurueck."""
+    """Reads env var `name` and casts it; otherwise falls back to `default`."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -43,53 +43,53 @@ def _env(name, default, cast=str):
     return cast(raw)
 
 
-# Modell — Default = GPT-2-small-Klasse (~124M Parameter).
+# Model — default = GPT-2-small class (~124M parameters).
 D_MODEL = _env("D_MODEL", 768, int)
 NUM_HEADS = _env("NUM_HEADS", 12, int)
-D_FF = _env("D_FF", 2048, int)         # SwiGLU (3 Matrizen): (2/3)*4*d_model ~ 2048
+D_FF = _env("D_FF", 2048, int)         # SwiGLU (3 matrices): (2/3)*4*d_model ~ 2048
 NUM_LAYERS = _env("NUM_LAYERS", 12, int)
-DROPOUT = _env("DROPOUT", 0.1, float)  # 0.0 waere Llama-Style; 0.1 schuetzt bei
-                                       # unserem noch daten-limitierten Korpus vor Overfit
+DROPOUT = _env("DROPOUT", 0.1, float)  # 0.0 would be Llama-style; 0.1 guards against
+                                       # overfitting on our still data-limited corpus
 
 # Training
-SEQ_LENGTH = _env("SEQ_LENGTH", 512, int)   # 128 -> 512: laengerer Kontext, realistischer
-# RoPE-Buffer-Groesse (Positions-Tabellen). Bewusst GROESSER als SEQ_LENGTH:
-# RoPE kodiert relative Abstaende, das Modell kann daher moderat ueber die
-# Trainingslaenge hinaus extrapolieren — aber nur so weit, wie der Buffer
-# reicht. 4096 gibt Headroom fuer Extrapolations-Experimente und spaeteres
-# Long-Context-Finetuning, kostet nur ein paar MB (nicht im Checkpoint).
+SEQ_LENGTH = _env("SEQ_LENGTH", 512, int)   # 128 -> 512: longer context, more realistic
+# RoPE buffer size (position tables). Deliberately LARGER than SEQ_LENGTH:
+# RoPE encodes relative distances, so the model can extrapolate moderately
+# beyond the training length — but only as far as the buffer reaches.
+# 4096 gives headroom for extrapolation experiments and later long-context
+# finetuning, and costs only a few MB (not part of the checkpoint).
 ROPE_MAX_SEQ = _env("ROPE_MAX_SEQ", 4096, int)
-BATCH_SIZE = _env("BATCH_SIZE", 16, int)    # Mikro-Batch (was auf eine GPU passt)
-GRAD_ACCUM_STEPS = _env("GRAD_ACCUM_STEPS", 3, int)  # effektiv 16*3 = 48 Sequenzen/Update
-LEARNING_RATE = _env("LEARNING_RATE", 6e-4, float)   # peak LR — GPT-2-small-Standard
-MIN_LR = _env("MIN_LR", 6e-5, float)        # LR-Untergrenze nach komplettem Cosine-Decay
-WEIGHT_DECAY = _env("WEIGHT_DECAY", 0.1, float)  # AdamW-Decay, nur auf Matrizen
-WARMUP_STEPS = _env("WARMUP_STEPS", 500, int)    # linearer Warmup ueber N Optimizer-Steps
-GRAD_CLIP = _env("GRAD_CLIP", 1.0, float)        # globale L2-Norm-Schranke fuer Gradienten
+BATCH_SIZE = _env("BATCH_SIZE", 16, int)    # micro-batch (what fits on one GPU)
+GRAD_ACCUM_STEPS = _env("GRAD_ACCUM_STEPS", 3, int)  # effectively 16*3 = 48 sequences/update
+LEARNING_RATE = _env("LEARNING_RATE", 6e-4, float)   # peak LR — the GPT-2-small standard
+MIN_LR = _env("MIN_LR", 6e-5, float)        # LR floor after the full cosine decay
+WEIGHT_DECAY = _env("WEIGHT_DECAY", 0.1, float)  # AdamW decay, applied to matrices only
+WARMUP_STEPS = _env("WARMUP_STEPS", 500, int)    # linear warmup over N optimizer steps
+GRAD_CLIP = _env("GRAD_CLIP", 1.0, float)        # global L2-norm bound for gradients
 NUM_EPOCHS = _env("NUM_EPOCHS", 1, int)
-USE_TORCH_COMPILE = _env("USE_TORCH_COMPILE", True, bool)  # auf CUDA grosser Speedup
-USE_AMP = _env("USE_AMP", True, bool)       # bf16-Autocast wenn die Hardware es kann
+USE_TORCH_COMPILE = _env("USE_TORCH_COMPILE", True, bool)  # big speedup on CUDA
+USE_AMP = _env("USE_AMP", True, bool)       # bf16 autocast if the hardware supports it
 
-# Daten
+# Data
 NUM_ARTICLES = _env("NUM_ARTICLES", 400000, int)
-VAL_FRACTION = _env("VAL_FRACTION", 0.02, float)  # Anteil Tokens fuer Validation-Split
-DATA_CACHE_DIR = _env("DATA_CACHE_DIR", "data_cache", str)  # Token-Cache fuer Re-Runs
-# Shard-Modus (grosse Laeufe): Pfad zu shards/manifest.json aus
-# prepare_data.py. Wenn gesetzt, werden die uint16-Shards per memmap
-# gelesen statt des kleinen In-RAM-Token-Caches oben.
+VAL_FRACTION = _env("VAL_FRACTION", 0.02, float)  # fraction of tokens for the validation split
+DATA_CACHE_DIR = _env("DATA_CACHE_DIR", "data_cache", str)  # token cache for re-runs
+# Shard mode (large runs): path to shards/manifest.json produced by
+# prepare_data.py. When set, the uint16 shards are read via memmap
+# instead of the small in-RAM token cache above.
 SHARD_MANIFEST = _env("SHARD_MANIFEST", "", str)
-# DataLoader-Prozesse: Default 4 auf CUDA (Shard-Reads parallel zur GPU),
-# 0 auf MPS/CPU — dort wuerde macOS' spawn-Start den In-RAM-Token-Tensor
-# pro Worker einmal KOPIEREN (teuer), waehrend der Gewinn minimal ist.
+# DataLoader processes: default 4 on CUDA (shard reads run in parallel with
+# the GPU), 0 on MPS/CPU — there, macOS' spawn start would COPY the in-RAM
+# token tensor once per worker (expensive) while the gain is minimal.
 NUM_WORKERS = _env("NUM_WORKERS", 4 if torch.cuda.is_available() else 0, int)
 
 # Checkpoints
 CHECKPOINT_DIR = "."
-CHECKPOINT_EVERY_N_EPOCHS = 1     # ganze Epochen sind jetzt lang -> jede speichern
-CHECKPOINT_EVERY_N_STEPS = 2000   # zusaetzlich rolling 'checkpoint_latest.pt'
-AUTO_RESUME = True                # neuesten Checkpoint automatisch laden
-RESUME_FROM = None                # ueberschreibt AUTO_RESUME wenn gesetzt
-# Architektur-Marker im Checkpoint, damit alte Files erkannt werden
+CHECKPOINT_EVERY_N_EPOCHS = 1     # full epochs are long now -> save every one
+CHECKPOINT_EVERY_N_STEPS = 2000   # plus a rolling 'checkpoint_latest.pt'
+AUTO_RESUME = True                # automatically load the newest checkpoint
+RESUME_FROM = None                # overrides AUTO_RESUME when set
+# Architecture marker in the checkpoint so old files can be detected
 ARCH_VERSION = "pre_ln_tied_swiglu_rope_init_rms_v1"
 
 
@@ -106,15 +106,15 @@ def get_device():
 
 
 def get_amp_dtype(device):
-    """bf16 fuer Autocast, wenn die Hardware es kann — sonst None (= fp32).
+    """bf16 for autocast if the hardware supports it — otherwise None (= fp32).
 
-    Warum bf16 statt fp16: gleicher Exponenten-Bereich wie fp32, d.h. kein
-    Gradient-Underflow und KEIN GradScaler noetig. Die Parameter bleiben
-    fp32 (Autocast castet nur die Ops im Forward), Optimizer-Step und
-    Gradient-Clipping laufen unveraendert in fp32.
+    Why bf16 instead of fp16: same exponent range as fp32, i.e. no gradient
+    underflow and NO GradScaler needed. The parameters stay fp32 (autocast
+    only casts the ops in the forward pass); the optimizer step and
+    gradient clipping run unchanged in fp32.
 
-    Auf MPS koennen aeltere Chips (M1) kein bf16 — statt Versions-Raterei
-    machen wir eine kleine Probe-Rechnung und fallen sauber auf fp32 zurueck.
+    On MPS, older chips (M1) can't do bf16 — instead of guessing by version
+    we run a tiny probe computation and fall back cleanly to fp32.
     """
     if device.type == "cuda":
         return torch.bfloat16 if torch.cuda.is_bf16_supported() else None
@@ -129,40 +129,40 @@ def get_amp_dtype(device):
 
 
 # ============================================================
-# Daten
+# Data
 # ============================================================
 
 def get_or_build_tokens(num_articles, encoding, cache_dir=DATA_CACHE_DIR):
-    """Cached Tokenisierung: laedt Tokens aus Cache, oder baut + speichert.
+    """Cached tokenization: loads tokens from the cache, or builds + saves them.
 
-    Beim ersten Aufruf mit gegebenem num_articles: Wikipedia-Snapshot wird
-    artikelweise gelesen, in Chunks von 1000 batched-tokenisiert (mit
-    tiktoken's multi-threaded encode_ordinary_batch), und das resultierende
-    Tensor in {cache_dir}/tokens-de-{num_articles}.pt gespeichert.
+    On the first call with a given num_articles: the Wikipedia snapshot is
+    read article by article, batch-tokenized in chunks of 1000 (using
+    tiktoken's multi-threaded encode_ordinary_batch), and the resulting
+    tensor is saved to {cache_dir}/tokens-de-{num_articles}.pt.
 
-    Bei Folge-Aufrufen wird nur das Tensor von Disk geladen — spart bei
-    50k+ Artikeln pro Run-Start mehrere Minuten Tokenisierung.
+    On subsequent calls only the tensor is loaded from disk — with 50k+
+    articles that saves several minutes of tokenization per run start.
     """
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, f"tokens-de-{num_articles}.pt")
 
     if os.path.exists(cache_path):
-        print(f"Lade Token-Cache: {cache_path}")
+        print(f"Loading token cache: {cache_path}")
         tokens = torch.load(cache_path, weights_only=True)
         print(f"  Tokens: {len(tokens):,}")
         return tokens
 
-    print(f"Tokenisiere {num_articles} Wikipedia-Artikel (kein Cache vorhanden)...")
+    print(f"Tokenizing {num_articles} Wikipedia articles (no cache found)...")
     ds = load_dataset(
         "wikimedia/wikipedia", "20231101.de", split="train", streaming=False
     )
     ds = ds.select(range(min(num_articles, len(ds))))
 
-    # Warum NumPy-Chunks statt einer wachsenden Python-Liste:
-    # `list.extend(tok_list)` baut eine Liste aus Python-int-Objekten — jedes
-    # ~28 Bytes. Bei 400M Tokens waeren das ~11 GB RAM (und langsam). Wir
-    # sammeln stattdessen pro Artikel ein kompaktes np.int32-Array (4 Bytes/
-    # Token) und konkatenieren einmal am Ende -> ~1.6 GB fuer 400M Tokens.
+    # Why NumPy chunks instead of a growing Python list:
+    # `list.extend(tok_list)` builds a list of Python int objects — each
+    # ~28 bytes. At 400M tokens that would be ~11 GB of RAM (and slow).
+    # Instead we collect one compact np.int32 array per article (4 bytes/
+    # token) and concatenate once at the end -> ~1.6 GB for 400M tokens.
     all_chunks = []
     running = 0
     chunk = 1000
@@ -170,7 +170,7 @@ def get_or_build_tokens(num_articles, encoding, cache_dir=DATA_CACHE_DIR):
     for i in range(0, len(ds), chunk):
         end = min(i + chunk, len(ds))
         texts = [a["text"] for a in ds.select(range(i, end))]
-        # encode_ordinary_batch: multi-threaded, keine Special-Token-Pruefung
+        # encode_ordinary_batch: multi-threaded, no special-token checking
         batched = encoding.encode_ordinary_batch(texts, num_threads=n_threads)
         for tok_list in batched:
             arr = np.asarray(tok_list, dtype=np.int32)
@@ -180,15 +180,15 @@ def get_or_build_tokens(num_articles, encoding, cache_dir=DATA_CACHE_DIR):
 
     tokens = torch.from_numpy(np.concatenate(all_chunks))
     mb = tokens.element_size() * tokens.numel() / 1024**2
-    print(f"  Cache schreiben: {cache_path} ({mb:.1f} MB)")
+    print(f"  Writing cache: {cache_path} ({mb:.1f} MB)")
     torch.save(tokens, cache_path)
     return tokens
 
 
 class TextDataset(Dataset):
-    """Naechstes-Token-Vorhersage:
-        Input  : Tokens [t0, t1, ..., t_{n-1}]
-        Target : Tokens [t1, t2, ..., t_n]
+    """Next-token prediction:
+        Input  : tokens [t0, t1, ..., t_{n-1}]
+        Target : tokens [t1, t2, ..., t_n]
     """
 
     def __init__(self, tokens, seq_length=128):
@@ -202,29 +202,29 @@ class TextDataset(Dataset):
     def __getitem__(self, idx):
         start = idx * self.seq_length
         end = start + self.seq_length + 1
-        # .long() statt torch.tensor(slice): torch.tensor() auf einem Tensor
-        # kopiert unnoetig (und PyTorch warnt davor). .long() macht genau
-        # eine Kopie, die beiden Rueckgaben sind Views darauf.
+        # .long() instead of torch.tensor(slice): torch.tensor() on a tensor
+        # copies unnecessarily (and PyTorch warns about it). .long() makes
+        # exactly one copy; the two return values are views into it.
         seq = self.tokens[start:end].long()
         return seq[:-1], seq[1:]
 
 
 class ShardDataset(Dataset):
-    """Aligned Fenster ueber memmapped uint16-Shards (aus prepare_data.py).
+    """Aligned windows over memmapped uint16 shards (from prepare_data.py).
 
-    Warum memmap: 10 Mrd. Tokens sind ~20 GB uint16 — zu viel fuer den RAM.
-    np.memmap oeffnet die Datei, ohne sie zu laden; das OS blendet nur die
-    tatsaechlich gelesenen Pages ein. Random Access auf NVMe ist dafuer
-    weit schneller als die GPU die Batches verbrauchen kann.
+    Why memmap: 10 billion tokens are ~20 GB of uint16 — too much for RAM.
+    np.memmap opens the file without loading it; the OS pages in only what
+    is actually read. Random access on NVMe is far faster than the GPU can
+    consume the batches anyway.
 
-    Split-Strategie: die letzten val_fraction Fenster JEDES Shards sind
-    Validation. So hat der Val-Split dieselbe Quellen-Mischung wie das
-    Training (Shards sind quellen-rein), und das Leak an der Schnittkante
-    ist hoechstens ein Dokument pro Shard.
+    Split strategy: the last val_fraction windows of EACH shard are
+    validation. That way the val split has the same source mix as the
+    training data (shards are source-pure), and the leak at the cut edge
+    is at most one document per shard.
 
-    Fenster sind seq_length-aligned wie bei TextDataset; an Shard-Grenzen
-    geht pro Shard maximal ein Fenster verloren — bei 100M-Token-Shards
-    vernachlaessigbar.
+    Windows are seq_length-aligned as in TextDataset; at shard boundaries
+    at most one window per shard is lost — negligible with 100M-token
+    shards.
     """
 
     def __init__(self, manifest_path, seq_length, split="train", val_fraction=0.02):
@@ -232,14 +232,14 @@ class ShardDataset(Dataset):
             manifest = json.load(f)
         if manifest.get("tokenizer") != "gpt2":
             raise RuntimeError(
-                f"Shards wurden mit Tokenizer '{manifest.get('tokenizer')}' "
-                "gebaut, das Training erwartet 'gpt2'."
+                f"Shards were built with tokenizer '{manifest.get('tokenizer')}', "
+                "but training expects 'gpt2'."
             )
         base = os.path.dirname(manifest_path)
         self.seq_length = seq_length
         self._paths = []
-        self._starts = []       # erstes Fenster dieses Shards (im Split)
-        cum = [0]               # kumulative Fensterzahl ueber die Shards
+        self._starts = []       # first window of this shard (within the split)
+        cum = [0]               # cumulative window count across the shards
         for shard in manifest["shards"]:
             n_windows = (shard["num_tokens"] - 1) // seq_length
             n_val = int(n_windows * val_fraction)
@@ -251,15 +251,15 @@ class ShardDataset(Dataset):
             self._starts.append(start)
             cum.append(cum[-1] + count)
         self._cum = cum
-        self._mmaps = {}  # shard-idx -> np.memmap, lazy pro Prozess
+        self._mmaps = {}  # shard idx -> np.memmap, lazy per process
 
     def __len__(self):
         return self._cum[-1]
 
     def __getstate__(self):
-        # DataLoader-Worker bekommen den Dataset per pickle. Ein np.memmap
-        # wuerde dabei als VOLLES Array serialisiert (der ganze Shard!) —
-        # deshalb die offenen Handles droppen; jeder Worker oeffnet lazy neu.
+        # DataLoader workers receive the dataset via pickle. An np.memmap
+        # would then get serialized as a FULL array (the entire shard!) —
+        # so drop the open handles; each worker lazily reopens them.
         state = self.__dict__.copy()
         state["_mmaps"] = {}
         return state
@@ -276,33 +276,33 @@ class ShardDataset(Dataset):
         window = self._starts[s] + (idx - self._cum[s])
         a = window * self.seq_length
         chunk = self._tokens(s)[a : a + self.seq_length + 1]
-        # astype kopiert aus dem mmap in normalen RAM — noetig, damit der
-        # Tensor nicht auf der Datei zeigt (und fuer int64, das Embedding-
-        # Lookups erwarten).
+        # astype copies from the mmap into regular RAM — needed so the
+        # tensor doesn't point into the file (and for int64, which
+        # embedding lookups expect).
         seq = torch.from_numpy(chunk.astype(np.int64))
         return seq[:-1], seq[1:]
 
 
 # ============================================================
-# Modell-Bausteine
+# Model building blocks
 # ============================================================
 
 class TokenEmbedding(nn.Module):
-    """Token-Lookup, ohne weitere Skalierung.
+    """Token lookup, without any further scaling.
 
-    Frueher: `embedding(x) * sqrt(d_model)`. Das stammt aus dem Original-
-    Transformer (Vaswani 2017), wo die Multiplikation die Embedding-Magnitude
-    an die additive sinusoidale Positional Encoding (Werte in [-1, 1])
-    anpassen sollte.
+    Previously: `embedding(x) * sqrt(d_model)`. That comes from the original
+    transformer (Vaswani 2017), where the multiplication was meant to match
+    the embedding magnitude to the additive sinusoidal positional encoding
+    (values in [-1, 1]).
 
-    Mit unserer modernen Architektur ist die Skalierung sogar SCHAEDLICH:
-      - RoPE ersetzt die additive PE -> die Magnitude-Anpassung ist unnoetig.
-      - Weight Tying: dieselbe Matrix bildet Tokens ein UND macht die End-
-        Projektion. Skalierte Inputs blaehen die Magnitude des Residual-
-        Streams auf, was nach norm_f zu sehr grossen initialen Logits fuehrt
-        und damit zu einem absurd hohen initialen Loss (484 statt log(50257)).
+    With our modern architecture the scaling is actually HARMFUL:
+      - RoPE replaces the additive PE -> the magnitude matching is unnecessary.
+      - Weight tying: the same matrix embeds tokens AND performs the final
+        projection. Scaled inputs inflate the magnitude of the residual
+        stream, which after norm_f leads to very large initial logits and
+        thus an absurdly high initial loss (484 instead of log(50257)).
 
-    Deshalb: keine Skalierung mehr. Modernes LLM-Recipe (GPT-2, Llama).
+    Hence: no more scaling. The modern LLM recipe (GPT-2, Llama).
     """
 
     def __init__(self, vocab_size, d_model):
@@ -315,38 +315,38 @@ class TokenEmbedding(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-    """Rotary Position Embeddings (RoPE) — Llama / GPT-NeoX Style.
+    """Rotary Position Embeddings (RoPE) — Llama / GPT-NeoX style.
 
-    Statt eine Positional Encoding *aufzuaddieren*, wird hier eine
-    *Rotation* auf Query- und Key-Vektoren angewandt — abhaengig von
-    ihrer Position in der Sequenz.
+    Instead of *adding* a positional encoding, a *rotation* is applied
+    to the query and key vectors — depending on their position in the
+    sequence.
 
-    Schluesseleigenschaft: das Skalarprodukt q_m * k_n nach RoPE haengt
-    nur von der *relativen* Position (m - n) ab. Das Modell lernt also
-    automatisch positionsrelative Attention, ohne dass wir absolute
-    Positionen mitfuehren muessen. Praktische Folgen:
-      - Bessere Extrapolation auf laengere Sequenzen als trainiert.
-      - Keine Embedding-Parameter fuer Positionen noetig.
+    Key property: the dot product q_m * k_n after RoPE depends only on
+    the *relative* position (m - n). So the model automatically learns
+    position-relative attention, without us having to carry absolute
+    positions around. Practical consequences:
+      - Better extrapolation to sequences longer than trained on.
+      - No embedding parameters needed for positions.
       - Standard in Llama, Mistral, Qwen, GPT-NeoX, PaLM-2, ...
 
-    Mathematisch wirkt RoPE auf jedes Dimensions-Paar (x_i, x_{i+d/2})
-    als 2D-Rotation um Winkel m * theta_i. Die theta_i folgen einer
-    geometrischen Progression:
-        theta_i = base^(-2i / d_head)   fuer i = 0..d_head/2-1
-    -> kleine i: hohe Frequenz (lokale Position),
-       grosse i: niedrige Frequenz (globale Position).
+    Mathematically, RoPE acts on each dimension pair (x_i, x_{i+d/2})
+    as a 2D rotation by angle m * theta_i. The theta_i follow a
+    geometric progression:
+        theta_i = base^(-2i / d_head)   for i = 0..d_head/2-1
+    -> small i: high frequency (local position),
+       large i: low frequency (global position).
     """
 
     def __init__(self, d_head, max_seq_len=2048, base=10000.0):
         super().__init__()
-        # Inverse Frequenzen: ein Wert pro Dimensions-Paar. Shape: [d_head/2]
+        # Inverse frequencies: one value per dimension pair. Shape: [d_head/2]
         inv_freq = 1.0 / (base ** (torch.arange(0, d_head, 2).float() / d_head))
 
-        # Winkel(Position m, Paar i) = m * theta_i.  Shape: [T, d_head/2]
+        # angle(position m, pair i) = m * theta_i.  Shape: [T, d_head/2]
         positions = torch.arange(max_seq_len).float()
         angles = torch.outer(positions, inv_freq)
 
-        # persistent=False -> nicht in state_dict (jederzeit neu berechenbar)
+        # persistent=False -> not in the state_dict (recomputable at any time)
         self.register_buffer("cos", angles.cos(), persistent=False)
         self.register_buffer("sin", angles.sin(), persistent=False)
 
@@ -355,20 +355,20 @@ class RotaryEmbedding(nn.Module):
 
 
 def apply_rotary(x, cos, sin):
-    """RoPE-Rotation auf x anwenden (GPT-NeoX / Llama Konvention).
+    """Apply the RoPE rotation to x (GPT-NeoX / Llama convention).
 
     x:        [B, H, T, d_head]
     cos, sin: [T, d_head/2]
 
-    Konvention: die ersten d_head/2 Dimensionen werden gegen die zweiten
-    d_head/2 Dimensionen rotiert. Mathematisch aequivalent zur Original-
-    RoPE-Definition mit benachbarten Paaren (0,1),(2,3),..., aber sauberer
-    im Code, weil chunk()/cat() den Speicher kontinuierlich halten.
+    Convention: the first d_head/2 dimensions are rotated against the
+    second d_head/2 dimensions. Mathematically equivalent to the original
+    RoPE definition with adjacent pairs (0,1),(2,3),..., but cleaner in
+    code because chunk()/cat() keep the memory contiguous.
 
         [new_x1]   [cos  -sin] [x1]
         [new_x2] = [sin   cos] [x2]
     """
-    x1, x2 = x.chunk(2, dim=-1)              # je [B, H, T, d_head/2]
+    x1, x2 = x.chunk(2, dim=-1)              # each [B, H, T, d_head/2]
     cos = cos.unsqueeze(0).unsqueeze(0)      # [1, 1, T, d_head/2]
     sin = sin.unsqueeze(0).unsqueeze(0)
     return torch.cat([
@@ -380,19 +380,19 @@ def apply_rotary(x, cos, sin):
 def scaled_dot_product_attention(Q, K, V, mask=None):
     """Attention(Q,K,V) = softmax(QK^T / sqrt(d_k)) * V
 
-    REFERENZ-IMPLEMENTIERUNG — der Trainingspfad nutzt inzwischen
-    F.scaled_dot_product_attention (fused Kernel, Flash-Attention-Stil).
-    Diese explizite Version zeigt, was dort intern passiert, und kann
-    genutzt werden, wenn man die Attention-Gewichte visualisieren will
-    (der fused Kernel gibt sie nie heraus).
+    REFERENCE IMPLEMENTATION — the training path now uses
+    F.scaled_dot_product_attention (fused kernel, Flash-Attention style).
+    This explicit version shows what happens inside it, and can be used
+    when you want to visualize the attention weights (the fused kernel
+    never exposes them).
 
-    Sie materialisiert die volle [B, H, T, T]-Score-Matrix — bei T=128
-    okay, bei langen Sequenzen der Speicher-Flaschenhals.
+    It materializes the full [B, H, T, T] score matrix — fine at T=128,
+    but the memory bottleneck for long sequences.
     """
     d_k = Q.size(-1)
     scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
     if mask is not None:
-        # -inf statt -1e9: -1e9 wuerde in fp16/bf16 overflowen.
+        # -inf instead of -1e9: -1e9 would overflow in fp16/bf16.
         scores = scores.masked_fill(mask == 0, float("-inf"))
     attn = F.softmax(scores, dim=-1)
     return torch.matmul(attn, V), attn
@@ -401,7 +401,7 @@ def scaled_dot_product_attention(Q, K, V, mask=None):
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads, dropout=0.1, max_seq_len=2048):
         super().__init__()
-        assert d_model % num_heads == 0, "d_model muss durch num_heads teilbar sein"
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
@@ -411,13 +411,13 @@ class MultiHeadAttention(nn.Module):
         self.W_v = nn.Linear(d_model, d_model)
         self.W_o = nn.Linear(d_model, d_model)
 
-        # RoPE wirkt pro Head, also auf d_k-dimensionale Vektoren.
+        # RoPE acts per head, i.e. on d_k-dimensional vectors.
         self.rope = RotaryEmbedding(self.d_k, max_seq_len=max_seq_len)
 
-        # Dropout auf den Attention-GEWICHTEN (GPT-2: "attn_pdrop") —
-        # wird direkt an den fused SDPA-Kernel uebergeben. Das Dropout
-        # auf dem Block-OUTPUT ("resid_pdrop") liegt im DecoderBlock;
-        # frueher lag es faelschlich an beiden Stellen (doppelt ~0.19).
+        # Dropout on the attention WEIGHTS (GPT-2: "attn_pdrop") —
+        # passed directly to the fused SDPA kernel. The dropout on the
+        # block OUTPUT ("resid_pdrop") lives in the DecoderBlock;
+        # previously it was mistakenly in both places (double, ~0.19).
         self.attn_dropout = dropout
 
     def split_heads(self, x):
@@ -435,17 +435,17 @@ class MultiHeadAttention(nn.Module):
         K = self.split_heads(self.W_k(x))
         V = self.split_heads(self.W_v(x))
 
-        # RoPE auf Q und K anwenden (NICHT auf V — V traegt Content,
-        # nicht Position; nur die Attention-Scores brauchen Position).
+        # Apply RoPE to Q and K (NOT to V — V carries content, not
+        # position; only the attention scores need position).
         cos, sin = self.rope(Q.size(2))
         Q = apply_rotary(Q, cos, sin)
         K = apply_rotary(K, cos, sin)
 
-        # Fused SDPA-Kernel (Flash-Attention-Stil): materialisiert die
-        # [B, H, T, T]-Score-Matrix nie -> weniger Speicher, schneller.
-        # is_causal=True ersetzt unsere manuelle Dreiecks-Maske.
-        # dropout_p muss manuell auf 0 in eval() — der Funktions-API
-        # kennt den train/eval-Zustand des Moduls nicht.
+        # Fused SDPA kernel (Flash-Attention style): never materializes
+        # the [B, H, T, T] score matrix -> less memory, faster.
+        # is_causal=True replaces our manual triangular mask.
+        # dropout_p must be set to 0 manually in eval() — the functional
+        # API doesn't know the module's train/eval state.
         out = F.scaled_dot_product_attention(
             Q, K, V,
             is_causal=True,
@@ -456,18 +456,18 @@ class MultiHeadAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    """Klassisches Two-Layer FFN — Aktivierung jetzt GELU statt ReLU.
+    """Classic two-layer FFN — activation is now GELU instead of ReLU.
 
-    GELU ist die in GPT-2 / BERT verwendete Variante:
-        GELU(x) = x * Phi(x)         (Phi = Standardnormal-CDF)
-    Vorteile gegenueber ReLU:
-      - Glatt und ueberall differenzierbar (auch fuer x<0 kein "harter Knick").
-      - Liefert fuer leicht negative Inputs einen kleinen, nicht-Null
-        Output -> weniger "tote" Neuronen, bessere Gradienten-Fluesse.
-      - Empirisch konstant minimal besser bei Transformern.
+    GELU is the variant used in GPT-2 / BERT:
+        GELU(x) = x * Phi(x)         (Phi = standard normal CDF)
+    Advantages over ReLU:
+      - Smooth and differentiable everywhere (no "hard kink" even for x<0).
+      - Produces a small, non-zero output for slightly negative inputs
+        -> fewer "dead" neurons, better gradient flow.
+      - Empirically consistently a tiny bit better in transformers.
 
-    Diese Klasse bleibt als Referenz-Baseline drin — der DecoderBlock
-    nutzt jetzt aber SwiGLU (siehe unten).
+    This class stays in as a reference baseline — but the DecoderBlock
+    now uses SwiGLU (see below).
     """
 
     def __init__(self, d_model, d_ff, dropout=0.1):
@@ -485,36 +485,36 @@ class FeedForward(nn.Module):
 
 
 class SwiGLU(nn.Module):
-    """SwiGLU FFN — Llama / Mistral / PaLM Style.
+    """SwiGLU FFN — Llama / Mistral / PaLM style.
 
-    Klassisches FFN:  out = W2( act(W1 x) )                   2 Matrizen
-    SwiGLU:           out = W_down( SiLU(W_gate x) (*) W_up x )  3 Matrizen
+    Classic FFN:  out = W2( act(W1 x) )                       2 matrices
+    SwiGLU:       out = W_down( SiLU(W_gate x) (*) W_up x )   3 matrices
 
-    Der entscheidende Unterschied: ein zweiter parallel-Pfad (W_up) und
-    eine elementweise Multiplikation (*). Der SiLU-Pfad fungiert als
-    "Gate": er entscheidet pro Position und pro Feature, wieviel vom
-    Value-Pfad (W_up) durchgelassen wird.
+    The crucial difference: a second parallel path (W_up) and an
+    element-wise multiplication (*). The SiLU path acts as a "gate":
+    it decides per position and per feature how much of the value
+    path (W_up) is let through.
 
-      SiLU(x) = x * sigmoid(x)   (auch "Swish" genannt)
+      SiLU(x) = x * sigmoid(x)   (also called "Swish")
 
-    Warum das hilft: das Modell kann fuer jedes Token dynamisch
-    waehlen, welche Features im FFN aktiv sind. Empirisch deutlich
-    besser als GELU bei gleicher Parameter-Anzahl, und Standard in
-    allen modernen LLMs (Llama 2/3, Mistral, Mixtral, PaLM, ...).
+    Why this helps: for every token, the model can dynamically
+    choose which features are active in the FFN. Empirically clearly
+    better than GELU at the same parameter count, and standard in
+    all modern LLMs (Llama 2/3, Mistral, Mixtral, PaLM, ...).
 
-    Parameter-Kosten: 3 statt 2 Matrizen. Llama reduziert daher
-    d_ff auf ca. (2/3) * 4 * d_model, um die Parameter-Anzahl zu
-    halten. Wir lassen d_ff erstmal bei 2048 (-> ca. +50 % FFN-Params
-    gegenueber GELU-FFN); bei Bedarf koennen wir D_FF auf 1408 senken.
+    Parameter cost: 3 matrices instead of 2. Llama therefore reduces
+    d_ff to about (2/3) * 4 * d_model to keep the parameter count
+    constant. We leave d_ff at 2048 for now (-> about +50 % FFN params
+    compared to the GELU FFN); if needed we can lower D_FF to 1408.
 
-    Kein eigenes Dropout mehr: das Residual-Dropout liegt zentral im
-    DecoderBlock — frueher wurde hier UND dort gedroppt (doppelt).
+    No dropout of its own anymore: the residual dropout lives centrally
+    in the DecoderBlock — previously we dropped here AND there (double).
     """
 
     def __init__(self, d_model, d_ff):
         super().__init__()
-        # bias=False ist Llama-Konvention; bei Weight-Tying & RMSNorm
-        # sparen die Biases ohnehin keine Modell-Kapazitaet.
+        # bias=False is the Llama convention; with weight tying & RMSNorm
+        # the biases don't buy any model capacity anyway.
         self.w_gate = nn.Linear(d_model, d_ff, bias=False)
         self.w_up = nn.Linear(d_model, d_ff, bias=False)
         self.w_down = nn.Linear(d_ff, d_model, bias=False)
@@ -527,22 +527,22 @@ class SwiGLU(nn.Module):
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization (Zhang & Sennrich 2019).
 
-    Vereinfachung der LayerNorm:
+    A simplification of LayerNorm:
       LayerNorm: y = gamma * (x - mean(x)) / std(x) + beta    (4 stats, 2 params)
       RMSNorm:   y = gamma * x / RMS(x)                       (1 stat,  1 param)
 
-    Wo RMS(x) = sqrt(mean(x^2)) ueber die letzte Dimension berechnet wird.
+    Where RMS(x) = sqrt(mean(x^2)) is computed over the last dimension.
 
-    Was wegfaellt:
-      - Mean-Subtraktion ("re-centering"). Empirisch in Transformern entbehrlich.
-      - Bias (beta). Kann von nachfolgenden Linear-Layers absorbiert werden.
+    What is dropped:
+      - Mean subtraction ("re-centering"). Empirically dispensable in transformers.
+      - Bias (beta). Can be absorbed by subsequent linear layers.
 
-    Was bleibt:
-      - Magnitude-Normalisierung. Sichert stabilen Forward/Backward.
-      - Gelernte Skalierung (gamma).
+    What remains:
+      - Magnitude normalization. Keeps forward/backward stable.
+      - Learned scaling (gamma).
 
-    Vorteile: ~10-20 % weniger Operations, gleich gute (oft minimal bessere)
-    Trainings-Dynamik. Standard in Llama, Mistral, Qwen, Gemma, Falcon.
+    Benefits: ~10-20 % fewer operations, equally good (often marginally
+    better) training dynamics. Standard in Llama, Mistral, Qwen, Gemma, Falcon.
     """
 
     def __init__(self, d_model, eps=1e-6):
@@ -551,26 +551,26 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x):
-        # mean of squares ueber die letzte Dimension; rsqrt = 1/sqrt
-        # (eine Hardware-Instruktion, schneller als getrennte Division)
+        # mean of squares over the last dimension; rsqrt = 1/sqrt
+        # (a single hardware instruction, faster than a separate division)
         ms = x.pow(2).mean(dim=-1, keepdim=True)
         x_normalized = x * torch.rsqrt(ms + self.eps)
         return self.weight * x_normalized
 
 
 class DecoderBlock(nn.Module):
-    """Transformer Decoder Block mit Pre-LayerNorm.
+    """Transformer decoder block with pre-layer norm.
 
-    Post-LN (Original):  x = LN( x + SubLayer(x) )
+    Post-LN (original):  x = LN( x + SubLayer(x) )
     Pre-LN  (GPT-2+):    x = x + SubLayer( LN(x) )
 
-    Pre-LN haelt den Residual-Pfad un-normalisiert, was tiefe Transformer
-    ohne LR-Warmup stabil trainierbar macht.
+    Pre-LN keeps the residual path un-normalized, which makes deep
+    transformers stably trainable without LR warmup.
 
-    Dropout-Platzierung (GPT-2-Schema): genau EIN Residual-Dropout pro
-    Sublayer, direkt vor der Addition auf den Residual-Stream. Die
-    Sublayer selbst droppen ihren Output nicht mehr — vorher wurde
-    doppelt gedroppt (effektiv ~0.19 statt 0.1).
+    Dropout placement (GPT-2 scheme): exactly ONE residual dropout per
+    sublayer, right before the addition onto the residual stream. The
+    sublayers themselves no longer drop their output — previously we
+    dropped twice (effectively ~0.19 instead of 0.1).
     """
 
     def __init__(self, d_model, num_heads, d_ff, dropout=0.1, max_seq_len=4096):
@@ -589,17 +589,17 @@ class DecoderBlock(nn.Module):
 
 
 def create_causal_mask(seq_len, device):
-    """Lower-triangular Maske: Position i sieht nur Positionen <= i.
+    """Lower-triangular mask: position i sees only positions <= i.
 
-    REFERENZ — nur noch fuer die explizite scaled_dot_product_attention
-    oben relevant. Der Trainingspfad nutzt is_causal=True im fused Kernel,
-    die Maske muss also nie als Tensor existieren.
+    REFERENCE — only relevant for the explicit scaled_dot_product_attention
+    above. The training path uses is_causal=True in the fused kernel, so
+    the mask never has to exist as a tensor.
     """
     return torch.tril(torch.ones(seq_len, seq_len, device=device))
 
 
 class GPTDecoder(nn.Module):
-    """GPT-Style Decoder-only Transformer (Pre-LN + Weight Tying)."""
+    """GPT-style decoder-only transformer (pre-LN + weight tying)."""
 
     def __init__(self, vocab_size, d_model, num_heads, d_ff, num_layers,
                  dropout=0.1, max_seq_len=4096):
@@ -612,32 +612,32 @@ class GPTDecoder(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # Pre-LN braucht eine finale Norm vor dem LM-Head, sonst kann
-        # der Residual-Stream ueber die Layer hinweg unbeschraenkt wachsen.
+        # Pre-LN needs a final norm before the LM head, otherwise the
+        # residual stream can grow without bound across the layers.
         self.norm_f = RMSNorm(d_model)
 
-        # bias=False, weil wir die Gewichte mit der Embedding-Matrix teilen.
+        # bias=False because we share the weights with the embedding matrix.
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
 
-        # Weight Tying: dieselbe [vocab_size, d_model] Matrix dient sowohl
-        # zum Einbetten (Token-ID -> Vektor) als auch zum Vorhersagen
-        # (Vektor -> Logits ueber Vocab). Spart ~25M Parameter und
-        # verbessert die Sample-Qualitaet meist sichtbar.
+        # Weight tying: the same [vocab_size, d_model] matrix serves both
+        # for embedding (token ID -> vector) and for prediction (vector ->
+        # logits over the vocab). Saves ~25M parameters and usually
+        # improves sample quality visibly.
         self.lm_head.weight = self.embedding.embedding.weight
 
         self.dropout = nn.Dropout(dropout)
 
-        # GPT-2 Init-Recipe — siehe _init_weights.
-        # Reihenfolge wichtig: erst Tying, dann Init, damit beide Verweise
-        # auf dieselbe Parameter-Instanz dasselbe initiale Sample sehen.
+        # GPT-2 init recipe — see _init_weights.
+        # Order matters: tie first, then init, so that both references
+        # to the same parameter instance see the same initial sample.
         self.apply(self._init_weights)
 
-        # Skalierte Init fuer "Output"-Projektionen jeder Residual-Branch:
-        # nach Pre-LN wachsen die Aktivierungen sonst pro Block linear an,
-        # weil jedes Residual aufaddiert. Wir teilen die initiale Magnitude
-        # dieser Projektionen durch sqrt(2 * num_layers) — Standard-Trick
-        # aus dem GPT-2 Paper. Betrifft W_o (Attention-Output) und w_down
-        # (SwiGLU-Output).
+        # Scaled init for the "output" projections of each residual branch:
+        # with pre-LN, the activations would otherwise grow linearly per
+        # block, because every residual gets added on. We divide the
+        # initial magnitude of these projections by sqrt(2 * num_layers) —
+        # the standard trick from the GPT-2 paper. Applies to W_o
+        # (attention output) and w_down (SwiGLU output).
         proj_std = 0.02 / math.sqrt(2 * num_layers)
         for block in self.decoder_blocks:
             nn.init.normal_(block.attention.W_o.weight, mean=0.0, std=proj_std)
@@ -645,13 +645,13 @@ class GPTDecoder(nn.Module):
 
     @staticmethod
     def _init_weights(module):
-        """GPT-2 Init-Schema: alle gewichteten Layers ~ N(0, 0.02^2), Biases = 0.
+        """GPT-2 init scheme: all weighted layers ~ N(0, 0.02^2), biases = 0.
 
-        Warum 0.02? Empirischer Wert aus dem GPT-2 Paper, gut kalibriert
-        fuer LayerNorm-basierte Transformer. Sorgt dafuer, dass:
-          - Initial-Aktivierungen bleiben in einem vernuenftigen Bereich.
-          - Initial-Logits klein sind (~N(0, sqrt(d_model)*0.02) = ~0.45),
-            d.h. Softmax fast uniform -> Initial-Loss ≈ log(vocab_size).
+        Why 0.02? An empirical value from the GPT-2 paper, well calibrated
+        for LayerNorm-based transformers. It ensures that:
+          - Initial activations stay in a reasonable range.
+          - Initial logits are small (~N(0, sqrt(d_model)*0.02) = ~0.45),
+            i.e. softmax nearly uniform -> initial loss ≈ log(vocab_size).
         """
         if isinstance(module, nn.Linear):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -672,34 +672,34 @@ class GPTDecoder(nn.Module):
     def generate(self, input_ids, max_new_tokens=50, temperature=1.0,
                  top_k=None, top_p=None, repetition_penalty=1.0,
                  eos_token_id=None):
-        """Autoregressives Sampling mit modernen Decoding-Strategien.
+        """Autoregressive sampling with modern decoding strategies.
 
-        temperature: skaliert Logits vor Softmax. <1 schaerfer, >1 flacher.
-        top_k:       behalte nur die k wahrscheinlichsten Tokens.
-        top_p:       Nucleus-Sampling — behalte Tokens deren kumulative
-                     Wahrscheinlichkeit <= p ist.
+        temperature: scales logits before softmax. <1 sharper, >1 flatter.
+        top_k:       keep only the k most likely tokens.
+        top_p:       nucleus sampling — keep tokens whose cumulative
+                     probability is <= p.
         repetition_penalty:
-                     >1.0 reduziert die Wahrscheinlichkeit von Tokens, die
-                     bereits im Kontext sind (gegen "Stadt im Stadt im Stadt").
-        eos_token_id: stoppt die Generierung, sobald dieses Token gesampelt
-                     wird (Batch=1). Ein Basismodell produziert es praktisch
-                     nie — erst das SFT bringt dem Modell bei, "fertig" zu
-                     signalisieren. Deshalb ist der Parameter optional.
+                     >1.0 lowers the probability of tokens that are already
+                     in the context (against "Stadt im Stadt im Stadt").
+        eos_token_id: stops generation as soon as this token is sampled
+                     (batch=1). A base model practically never produces it —
+                     only SFT teaches the model to signal "done". That is
+                     why the parameter is optional.
 
-        Reihenfolge: rep_penalty -> /temperature -> top_k -> top_p -> sample.
+        Order: rep_penalty -> /temperature -> top_k -> top_p -> sample.
         """
-        # Trainings-Modus merken und am Ende wiederherstellen — sonst hat
-        # ein generate()-Aufruf den Seiteneffekt, Dropout dauerhaft
-        # abzuschalten, falls der Aufrufer weitertrainiert.
+        # Remember the training mode and restore it at the end — otherwise
+        # a generate() call would have the side effect of permanently
+        # disabling dropout if the caller keeps training.
         was_training = self.training
         self.eval()
         for _ in range(max_new_tokens):
             logits = self.forward(input_ids)
-            logits = logits[:, -1, :]  # [B, V] — Logits fuer das naechste Token
+            logits = logits[:, -1, :]  # [B, V] — logits for the next token
 
-            # 1. Repetition Penalty: Logits bereits gesehener Tokens daempfen.
-            # HuggingFace-Konvention: positive Logits / penalty, negative * penalty
-            # (beides treibt das Logit Richtung minus-unendlich).
+            # 1. Repetition penalty: dampen the logits of tokens already seen.
+            # HuggingFace convention: positive logits / penalty, negative * penalty
+            # (both push the logit toward minus infinity).
             if repetition_penalty != 1.0:
                 for b in range(input_ids.size(0)):
                     seen = torch.unique(input_ids[b])
@@ -711,32 +711,32 @@ class GPTDecoder(nn.Module):
             # 2. Temperature
             logits = logits / temperature
 
-            # 3. Top-k: setze alle ausser den top-k Logits auf -inf.
+            # 3. Top-k: set everything except the top-k logits to -inf.
             if top_k is not None and top_k > 0:
                 k = min(top_k, logits.size(-1))
                 topk_vals, _ = torch.topk(logits, k)
-                threshold = topk_vals[..., -1, None]  # kleinster Top-k Wert
+                threshold = topk_vals[..., -1, None]  # smallest top-k value
                 logits = torch.where(logits < threshold,
                                      torch.full_like(logits, float("-inf")),
                                      logits)
 
-            # 4. Top-p (Nucleus): sortiere absteigend, behalte minimale
-            # Tokenmenge deren kumulative Prob >= top_p ist.
+            # 4. Top-p (nucleus): sort descending, keep the minimal set of
+            # tokens whose cumulative prob is >= top_p.
             if top_p is not None and 0.0 < top_p < 1.0:
                 sorted_logits, sorted_idx = torch.sort(logits, descending=True)
                 sorted_probs = F.softmax(sorted_logits, dim=-1)
                 cumulative = torch.cumsum(sorted_probs, dim=-1)
-                # Tokens markieren, deren kumulative Prob top_p ueberschreitet.
+                # Mark tokens whose cumulative prob exceeds top_p.
                 remove_sorted = cumulative > top_p
-                # Shift nach rechts — den ersten Ueberschreiter noch behalten.
+                # Shift right — still keep the first token that crosses the line.
                 remove_sorted[..., 1:] = remove_sorted[..., :-1].clone()
                 remove_sorted[..., 0] = False
-                # Maske zurueck auf Original-Indizes mappen.
+                # Map the mask back onto the original indices.
                 remove = torch.zeros_like(logits, dtype=torch.bool)
                 remove.scatter_(-1, sorted_idx, remove_sorted)
                 logits = logits.masked_fill(remove, float("-inf"))
 
-            # 5. Softmax + Multinomial Sample
+            # 5. Softmax + multinomial sample
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             input_ids = torch.cat([input_ids, next_token], dim=1)
@@ -753,10 +753,10 @@ class GPTDecoder(nn.Module):
 # ============================================================
 
 def save_checkpoint(model, optimizer, epoch, global_step, loss, filepath, config):
-    # torch.compile wrappt das Modell in ein OptimizedModule — dessen
-    # state_dict-Keys bekommen ein '_orig_mod.'-Praefix. Wir speichern immer
-    # das unkompilierte Original, damit das Checkpoint-Format nicht davon
-    # abhaengt, ob mit oder ohne compile trainiert wurde.
+    # torch.compile wraps the model in an OptimizedModule — whose
+    # state_dict keys get an '_orig_mod.' prefix. We always save the
+    # uncompiled original so the checkpoint format doesn't depend on
+    # whether training ran with or without compile.
     raw_model = getattr(model, "_orig_mod", model)
     torch.save({
         "epoch": epoch,
@@ -767,24 +767,24 @@ def save_checkpoint(model, optimizer, epoch, global_step, loss, filepath, config
         "config": config,
         "arch_version": ARCH_VERSION,
     }, filepath)
-    print(f"  Checkpoint gespeichert: {filepath}")
+    print(f"  Checkpoint saved: {filepath}")
 
 
 def load_checkpoint(filepath, model, optimizer, device):
     ckpt = torch.load(filepath, map_location=device)
 
-    # Inkompatibilitaet hart erkennen, statt mit zufaellig initialisierter
-    # norm_f / falsch getieden lm_head-Gewichten weiterzumachen.
+    # Detect incompatibility hard, instead of carrying on with a randomly
+    # initialized norm_f / incorrectly tied lm_head weights.
     ckpt_arch = ckpt.get("arch_version", "legacy_post_ln")
     if ckpt_arch != ARCH_VERSION:
         raise RuntimeError(
-            f"Checkpoint '{filepath}' hat arch_version='{ckpt_arch}', "
-            f"aktuelle Architektur ist '{ARCH_VERSION}'. "
-            "Loeschen, umbenennen, oder von Hand migrieren."
+            f"Checkpoint '{filepath}' has arch_version='{ckpt_arch}', "
+            f"the current architecture is '{ARCH_VERSION}'. "
+            "Delete it, rename it, or migrate it by hand."
         )
 
-    # Aeltere Checkpoints wurden aus dem kompilierten Modell gespeichert
-    # ('_orig_mod.'-Praefix in den Keys) — beim Laden normalisieren.
+    # Older checkpoints were saved from the compiled model
+    # ('_orig_mod.' prefix in the keys) — normalize when loading.
     raw_model = getattr(model, "_orig_mod", model)
     state_dict = {
         k.removeprefix("_orig_mod."): v
@@ -796,26 +796,26 @@ def load_checkpoint(filepath, model, optimizer, device):
         try:
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         except (ValueError, KeyError) as e:
-            # Z.B. Checkpoint von plain Adam (1 Param-Group), aktueller
-            # Optimizer ist AdamW mit decay/no-decay-Groups. Die Modell-
-            # Gewichte sind geladen; nur die Adam-Momente starten frisch.
-            print(f"  Optimizer-State inkompatibel — starte mit frischem "
-                  f"Optimizer ({type(e).__name__}: {e})")
+            # E.g. a checkpoint from plain Adam (1 param group) while the
+            # current optimizer is AdamW with decay/no-decay groups. The
+            # model weights are loaded; only the Adam moments start fresh.
+            print(f"  Optimizer state incompatible — starting with a fresh "
+                  f"optimizer ({type(e).__name__}: {e})")
     epoch = ckpt["epoch"]
     global_step = ckpt.get("global_step", 0)
-    print(f"  Checkpoint geladen: Epoche {epoch}, Step {global_step}, Loss {ckpt['loss']:.4f}")
+    print(f"  Checkpoint loaded: epoch {epoch}, step {global_step}, loss {ckpt['loss']:.4f}")
     return epoch, global_step, ckpt["loss"]
 
 
 def find_latest_checkpoint(directory):
-    """Sucht den juengsten Checkpoint (epoch- oder rolling-latest).
+    """Finds the most recent checkpoint (epoch or rolling latest).
 
-    Beruecksichtigt:
-      - checkpoint_epoch_N.pt (am Epoche-Ende geschrieben)
-      - checkpoint_latest.pt  (rolling mid-epoch, immer ueberschrieben)
+    Considers:
+      - checkpoint_epoch_N.pt (written at the end of an epoch)
+      - checkpoint_latest.pt  (rolling mid-epoch, always overwritten)
 
-    Auswahl per mtime — der zuletzt geschriebene Checkpoint gewinnt,
-    egal welcher Typ. None wenn nichts gefunden.
+    Selected by mtime — the checkpoint written last wins, regardless
+    of type. None if nothing is found.
     """
     paths = glob.glob(os.path.join(directory, "checkpoint_epoch_*.pt"))
     latest_path = os.path.join(directory, "checkpoint_latest.pt")
@@ -827,14 +827,14 @@ def find_latest_checkpoint(directory):
 
 
 def checkpoint_dims_match(filepath):
-    """True, wenn der Checkpoint dieselben Modell-Dimensionen hat wie die
-    aktuelle Konfiguration.
+    """True if the checkpoint has the same model dimensions as the
+    current configuration.
 
-    Warum noetig: der ARCH_VERSION-Check faengt nur ARCHITEKTUR-Aenderungen ab
-    (z.B. LayerNorm -> RMSNorm), nicht GROESSEN-Aenderungen bei gleicher
-    Architektur. Wenn man von 51M auf 124M skaliert und noch ein alter
-    Checkpoint herumliegt, wuerde load_state_dict sonst mit einem kryptischen
-    'size mismatch' sterben. Hier pruefen wir vorab und starten sauber frisch.
+    Why this is needed: the ARCH_VERSION check only catches ARCHITECTURE
+    changes (e.g. LayerNorm -> RMSNorm), not SIZE changes within the same
+    architecture. If you scale from 51M to 124M with an old checkpoint
+    still lying around, load_state_dict would otherwise die with a cryptic
+    'size mismatch'. Here we check up front and cleanly start fresh.
     """
     try:
         cfg = torch.load(filepath, map_location="cpu").get("config", {})
@@ -851,24 +851,24 @@ def checkpoint_dims_match(filepath):
 # ============================================================
 
 def configure_optimizer(model, lr, weight_decay, betas=(0.9, 0.95)):
-    """AdamW mit selektivem Weight Decay — GPT-2/Llama-Recipe.
+    """AdamW with selective weight decay — the GPT-2/Llama recipe.
 
-    Warum AdamW statt Adam: bei Adam interagiert L2-Regularisierung mit
-    der per-Parameter-Skalierung der Gradienten und wirkt dadurch nicht
-    als echter Decay (Loshchilov & Hutter 2019). AdamW entkoppelt den
-    Decay vom Gradienten-Update — nur so wirkt weight_decay wie gedacht.
+    Why AdamW instead of Adam: with Adam, L2 regularization interacts with
+    the per-parameter scaling of the gradients and therefore doesn't act
+    as a true decay (Loshchilov & Hutter 2019). AdamW decouples the decay
+    from the gradient update — only then does weight_decay work as intended.
 
-    Decay nur auf Matrizen (dim >= 2): Linear- und Embedding-Gewichte.
-    RMSNorm-Gains und Biases (dim 1) NICHT decayen — sie skalieren
-    Aktivierungen, ein Zug Richtung 0 wuerde dort nur das Training
-    stoeren, ohne zu regularisieren. (Konvention aus GPT-2/nanoGPT.)
+    Decay only on matrices (dim >= 2): linear and embedding weights.
+    Do NOT decay RMSNorm gains and biases (dim 1) — they scale
+    activations; a pull toward 0 would only disturb training there
+    without regularizing. (Convention from GPT-2/nanoGPT.)
 
-    betas=(0.9, 0.95): das niedrigere beta2 (statt 0.999) reagiert
-    schneller auf Gradienten-Varianz-Aenderungen — Standard bei
-    LLM-Training (GPT-3, Llama).
+    betas=(0.9, 0.95): the lower beta2 (instead of 0.999) reacts faster
+    to changes in gradient variance — standard in LLM training
+    (GPT-3, Llama).
 
-    named_parameters() dedupliziert geteilte Parameter, das getiede
-    embedding/lm_head-Gewicht landet also genau einmal in der Liste.
+    named_parameters() deduplicates shared parameters, so the tied
+    embedding/lm_head weight ends up exactly once in the list.
     """
     decay_params = []
     no_decay_params = []
@@ -886,18 +886,20 @@ def configure_optimizer(model, lr, weight_decay, betas=(0.9, 0.95)):
 
 
 def get_lr(step, warmup_steps, max_steps, base_lr, min_lr):
-    """LR-Schedule: linearer Warmup gefolgt von Cosine Decay.
+    """LR schedule: linear warmup followed by cosine decay.
 
-    Warmup (step < warmup_steps): von ~0 linear auf base_lr.
-    Cosine (danach): von base_lr cosinus-formig auf min_lr ueber den Rest.
+    Warmup (step < warmup_steps): linearly from ~0 up to base_lr.
+    Cosine (afterwards): from base_lr down to min_lr in a cosine shape
+    over the remainder.
 
-    Warum Warmup? Adam braucht ein paar Schritte um vernuenftige
-    Moment-Schaetzer aufzubauen — vorher kann ein voller LR zu
-    Loss-Explosionen fuehren, gerade bei zufaelliger Initialisierung.
+    Why warmup? Adam needs a few steps to build up reasonable moment
+    estimates — before that, a full LR can cause loss explosions,
+    especially with random initialization.
 
-    Warum Cosine Decay? Empirisch besser als step decay / linear decay,
-    weil das Modell anfangs lange mit hohem LR exploriert und am Ende
-    sanft konvergiert. Standard in Llama, GPT-3, fast allen modernen LLMs.
+    Why cosine decay? Empirically better than step decay / linear decay,
+    because the model spends a long time exploring with a high LR at the
+    start and converges gently at the end. Standard in Llama, GPT-3, and
+    almost all modern LLMs.
     """
     if step < warmup_steps:
         return base_lr * (step + 1) / warmup_steps
@@ -910,29 +912,28 @@ def train_epoch(model, dataloader, criterion, optimizer, device, vocab_size,
                 global_step, max_steps, warmup_steps, base_lr, min_lr, grad_clip,
                 grad_accum_steps=1, amp_dtype=None,
                 save_step_interval=None, save_callback=None):
-    """Trainiert eine Epoche mit Gradient Accumulation.
+    """Trains one epoch with gradient accumulation.
 
-    Gradient Accumulation: wir sammeln die Gradienten aus `grad_accum_steps`
-    Mikro-Batches auf, bevor wir EINEN Optimizer-Step machen. Effektiv
-    trainieren wir damit mit (batch_size * grad_accum_steps) Sequenzen pro
-    Update, ohne den Speicher fuer so einen grossen Batch auf einmal zu
-    brauchen. Warum das zaehlt: groessere Batches liefern weniger verrauschte
-    Gradienten (gut fuer groessere Modelle), aber der GPU-Speicher deckelt die
-    ECHTE Batch-Groesse. Accumulation entkoppelt beides.
+    Gradient accumulation: we accumulate the gradients from `grad_accum_steps`
+    micro-batches before taking ONE optimizer step. Effectively we thereby
+    train with (batch_size * grad_accum_steps) sequences per update, without
+    needing the memory for such a large batch all at once. Why this matters:
+    larger batches yield less noisy gradients (good for larger models), but
+    GPU memory caps the REAL batch size. Accumulation decouples the two.
 
-    Der `loss / grad_accum_steps`-Trick: PyTorch ADDIERT Gradienten ueber
-    mehrere backward()-Aufrufe. Damit die Summe dem MITTEL ueber den grossen
-    Batch entspricht (nicht seiner Summe), skalieren wir jeden Teil-Loss vor
-    dem backward() herunter.
+    The `loss / grad_accum_steps` trick: PyTorch ADDS gradients across
+    multiple backward() calls. So that the sum equals the MEAN over the
+    large batch (not its sum), we scale each partial loss down before
+    its backward().
 
-    global_step zaehlt OPTIMIZER-Steps (nicht Mikro-Batches) — nur so passt
-    der LR-Schedule, der in Optimizer-Steps gedacht ist.
+    global_step counts OPTIMIZER steps (not micro-batches) — only then does
+    the LR schedule, which thinks in optimizer steps, line up.
 
-    save_step_interval: alle N Optimizer-Steps save_callback(global_step, loss).
-    amp_dtype:          z.B. torch.bfloat16 -> Forward+Loss unter Autocast.
+    save_step_interval: every N optimizer steps, save_callback(global_step, loss).
+    amp_dtype:          e.g. torch.bfloat16 -> forward+loss under autocast.
     """
     model.train()
-    total_loss = torch.zeros((), device=device)  # Akkumulation auf dem Device
+    total_loss = torch.zeros((), device=device)  # accumulate on the device
     n_microbatches = 0
     last_lr = 0.0
     amp_ctx = (torch.autocast(device_type=device.type, dtype=amp_dtype)
@@ -947,25 +948,25 @@ def train_epoch(model, dataloader, criterion, optimizer, device, vocab_size,
             logits = model(input_ids)
             loss = criterion(logits.view(-1, vocab_size), target_ids.view(-1))
 
-        # Runterskalieren -> aufsummierte Grads == Mittel ueber den grossen Batch
+        # Scale down -> the summed grads == mean over the large batch
         (loss / grad_accum_steps).backward()
 
-        # .detach() statt .item(): .item() erzwingt einen CPU<->GPU-Sync. Wir
-        # akkumulieren als Tensor auf dem Device und syncen nur beim Logging.
+        # .detach() instead of .item(): .item() forces a CPU<->GPU sync. We
+        # accumulate as a tensor on the device and only sync when logging.
         total_loss += loss.detach()
         n_microbatches += 1
 
-        # Optimizer-Step erst, wenn ein volles Accumulation-Fenster voll ist.
+        # Take an optimizer step only once a full accumulation window is done.
         if (batch_idx + 1) % grad_accum_steps == 0:
-            # LR fuer diesen Optimizer-Step setzen
+            # Set the LR for this optimizer step
             lr = get_lr(global_step, warmup_steps, max_steps, base_lr, min_lr)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
             last_lr = lr
 
-            # Gradient Clipping: kappt die globale L2-Norm aller Gradienten auf
-            # grad_clip. Verhindert, dass ein Ausreisser-Batch das Modell in
-            # eine schlechte Region kickt ("loss spike").
+            # Gradient clipping: caps the global L2 norm of all gradients at
+            # grad_clip. Prevents an outlier batch from kicking the model
+            # into a bad region ("loss spike").
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
             optimizer.step()
@@ -976,7 +977,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, vocab_size,
                 print(f"  Step {global_step}/{max_steps}, "
                       f"loss={loss.item():.4f}, lr={lr:.2e}")
 
-            # Rolling Mid-Epoch Checkpoint
+            # Rolling mid-epoch checkpoint
             if save_step_interval and save_callback and global_step % save_step_interval == 0:
                 save_callback(global_step, loss.item())
 
@@ -985,10 +986,10 @@ def train_epoch(model, dataloader, criterion, optimizer, device, vocab_size,
 
 @torch.no_grad()
 def evaluate(model, dataloader, criterion, device, vocab_size, amp_dtype=None):
-    """Mittlerer Loss auf dem Validation-Set.
+    """Mean loss on the validation set.
 
-    eval()-Modus deaktiviert Dropout, und @torch.no_grad() spart Speicher
-    und Zeit, weil keine Gradienten gebaut werden.
+    eval() mode disables dropout, and @torch.no_grad() saves memory
+    and time because no gradients are built.
     """
     model.eval()
     total_loss = torch.zeros((), device=device)
@@ -1008,7 +1009,7 @@ def evaluate(model, dataloader, criterion, device, vocab_size, amp_dtype=None):
 
 def generate_samples(model, encoding, device, prompts, max_new_tokens=20,
                      temperature=0.8, top_p=0.9, repetition_penalty=1.2):
-    """Generiert Samples mit konservativem, repetitions-armem Sampling."""
+    """Generates samples with conservative, low-repetition sampling."""
     for prompt in prompts:
         start = encoding.encode(prompt)
         input_ids = torch.tensor([start], device=device)
@@ -1032,33 +1033,33 @@ def main():
     amp_dtype = get_amp_dtype(device) if USE_AMP else None
     print(f"Device: {device}")
     print(f"PyTorch: {torch.__version__}")
-    print(f"Autocast: {amp_dtype if amp_dtype else 'aus (fp32)'}\n")
+    print(f"Autocast: {amp_dtype if amp_dtype else 'off (fp32)'}\n")
 
-    # --- Daten ---
+    # --- Data ---
     encoding = tiktoken.get_encoding("gpt2")
     vocab_size = encoding.n_vocab
     print(f"  Vocab: {vocab_size}")
 
     if SHARD_MANIFEST:
-        # Shard-Modus (grosse Laeufe): memmap ueber prepare_data.py-Shards.
+        # Shard mode (large runs): memmap over prepare_data.py shards.
         if not os.path.exists(SHARD_MANIFEST):
             raise FileNotFoundError(
-                f"SHARD_MANIFEST='{SHARD_MANIFEST}' existiert nicht — "
-                "erst `python prepare_data.py` laufen lassen."
+                f"SHARD_MANIFEST='{SHARD_MANIFEST}' does not exist — "
+                "run `python prepare_data.py` first."
             )
         train_ds = ShardDataset(SHARD_MANIFEST, SEQ_LENGTH, "train", VAL_FRACTION)
         val_ds = ShardDataset(SHARD_MANIFEST, SEQ_LENGTH, "val", VAL_FRACTION)
         n_tok = (len(train_ds) + len(val_ds)) * SEQ_LENGTH
-        print(f"  Shard-Modus: {SHARD_MANIFEST} (~{n_tok / 1e9:.2f} Mrd. Tokens)")
-        print(f"  Split: {len(train_ds):,} train / {len(val_ds):,} val Fenster\n")
+        print(f"  Shard mode: {SHARD_MANIFEST} (~{n_tok / 1e9:.2f} billion tokens)")
+        print(f"  Split: {len(train_ds):,} train / {len(val_ds):,} val windows\n")
     else:
-        # Legacy-Modus (kleine Laeufe): ein Token-Tensor im RAM.
+        # Legacy mode (small runs): a single token tensor in RAM.
         tokens = get_or_build_tokens(NUM_ARTICLES, encoding)
 
-        # Train / Val Split — letzte VAL_FRACTION der Tokens als Validation.
-        # (Sequentieller Split, NICHT Shuffle: Wikipedia-Artikel sind im
-        # Stream sequenziell konkateniert, ein zufaelliger Token-Shuffle
-        # wuerde Tokens aus demselben Artikel in beide Splits leaken.)
+        # Train / val split — the last VAL_FRACTION of the tokens become
+        # validation. (Sequential split, NOT shuffled: Wikipedia articles
+        # are concatenated sequentially in the stream; a random token
+        # shuffle would leak tokens from the same article into both splits.)
         split_idx = int(len(tokens) * (1 - VAL_FRACTION))
         train_tokens = tokens[:split_idx]
         val_tokens = tokens[split_idx:]
@@ -1066,11 +1067,11 @@ def main():
         train_ds = TextDataset(train_tokens, seq_length=SEQ_LENGTH)
         val_ds = TextDataset(val_tokens, seq_length=SEQ_LENGTH)
 
-    # pin_memory (nur CUDA): Batches landen in page-locked RAM, der
-    # Host->GPU-Copy laeuft dann DMA-asynchron. num_workers>0 lagert das
-    # Lesen/Konvertieren in eigene Prozesse aus, damit die GPU nie auf
-    # Daten wartet — im Shard-Modus wichtig, weil dort pro Batch von der
-    # Disk gelesen wird.
+    # pin_memory (CUDA only): batches land in page-locked RAM, so the
+    # host->GPU copy then runs DMA-asynchronously. num_workers>0 offloads
+    # the reading/converting into separate processes so the GPU never
+    # waits for data — important in shard mode, because there every batch
+    # is read from disk.
     pin = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
                               drop_last=True, num_workers=NUM_WORKERS, pin_memory=pin)
@@ -1079,7 +1080,7 @@ def main():
     print(f"DataLoader: {len(train_loader)} train batches, {len(val_loader)} val batches, "
           f"{NUM_WORKERS} workers\n")
 
-    # --- Modell ---
+    # --- Model ---
     model = GPTDecoder(
         vocab_size=vocab_size,
         d_model=D_MODEL,
@@ -1087,22 +1088,22 @@ def main():
         d_ff=D_FF,
         num_layers=NUM_LAYERS,
         dropout=DROPOUT,
-        # Buffer mindestens so gross wie die Trainingslaenge — sonst wuerde
-        # RoPE beim ersten Batch out-of-range greifen.
+        # Buffer at least as large as the training length — otherwise RoPE
+        # would index out of range on the first batch.
         max_seq_len=max(ROPE_MAX_SEQ, SEQ_LENGTH),
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Modell: {n_params:,} Parameter")
+    print(f"Parameters: {n_params:,}")
 
-    # torch.compile: fusioniert Ops, eliminiert Sync-Punkte, kann auf MPS
-    # 30-100 % Speedup bringen. Erster Forward-Pass ist langsam (Kompilation),
-    # danach schneller. Fail-safe: bei Crash auf eager fallback.
+    # torch.compile: fuses ops, eliminates sync points, can bring a
+    # 30-100 % speedup on MPS. The first forward pass is slow (compilation),
+    # faster afterwards. Fail-safe: fall back to eager on a crash.
     if USE_TORCH_COMPILE:
         try:
             model = torch.compile(model)
-            print("torch.compile: aktiv (erster Batch laeuft langsamer wegen JIT)")
+            print("torch.compile: active (first batch runs slower due to JIT)")
         except Exception as e:
-            print(f"torch.compile fehlgeschlagen, eager mode: {e}")
+            print(f"torch.compile failed, eager mode: {e}")
     print()
 
     # --- Optimizer + Loss ---
@@ -1116,24 +1117,24 @@ def main():
     if resume_path is None and AUTO_RESUME:
         resume_path = find_latest_checkpoint(CHECKPOINT_DIR)
         if resume_path:
-            print(f"Auto-Resume: '{resume_path}'")
+            print(f"Auto-resume: '{resume_path}'")
 
     if resume_path and os.path.exists(resume_path) and not checkpoint_dims_match(resume_path):
-        print(f"  Checkpoint '{resume_path}' hat andere Modell-Dimensionen als "
-              f"die aktuelle Konfiguration ({D_MODEL}d / {NUM_LAYERS}L) — "
-              f"ignoriere ihn, starte frisch.")
+        print(f"  Checkpoint '{resume_path}' has different model dimensions than "
+              f"the current configuration ({D_MODEL}d / {NUM_LAYERS}L) — "
+              f"ignoring it, starting fresh.")
         resume_path = None
 
     if resume_path and os.path.exists(resume_path):
         start_epoch, global_step, _ = load_checkpoint(resume_path, model, optimizer, device)
     elif resume_path:
-        print(f"  (Kein Checkpoint '{resume_path}' gefunden — starte frisch.)")
+        print(f"  (No checkpoint '{resume_path}' found — starting fresh.)")
     else:
-        print("Starte frisches Training (kein Checkpoint).")
+        print("Starting fresh training (no checkpoint).")
 
-    # --- Training-Loop ---
-    # Auch die Trainings-Hyperparameter mitschreiben, damit man spaeter
-    # einem Checkpoint ansieht, mit welchen Settings er entstand.
+    # --- Training loop ---
+    # Also record the training hyperparameters, so that later you can
+    # tell from a checkpoint which settings produced it.
     config = dict(
         vocab_size=vocab_size, d_model=D_MODEL, num_heads=NUM_HEADS,
         d_ff=D_FF, num_layers=NUM_LAYERS, seq_length=SEQ_LENGTH,
@@ -1142,31 +1143,32 @@ def main():
         warmup_steps=WARMUP_STEPS, grad_clip=GRAD_CLIP, num_articles=NUM_ARTICLES,
         amp_dtype=str(amp_dtype) if amp_dtype else None,
     )
+    # German prompts — the model only speaks German.
     test_prompts = ["Die Geschichte", "Im Jahr", "Deutschland ist"]
-    # max_steps zaehlt OPTIMIZER-Steps: pro Epoche floor(#Batches / grad_accum).
+    # max_steps counts OPTIMIZER steps: floor(#batches / grad_accum) per epoch.
     steps_per_epoch = len(train_loader) // GRAD_ACCUM_STEPS
     max_steps = NUM_EPOCHS * steps_per_epoch
     eff_batch = BATCH_SIZE * GRAD_ACCUM_STEPS
-    print(f"Effektive Batch: {BATCH_SIZE} x {GRAD_ACCUM_STEPS} accum = {eff_batch} "
-          f"Sequenzen ({eff_batch * SEQ_LENGTH:,} Tokens/Step)")
+    print(f"Effective batch: {BATCH_SIZE} x {GRAD_ACCUM_STEPS} = {eff_batch} "
+          f"sequences ({eff_batch * SEQ_LENGTH:,} tokens/step)")
     print(f"Training: max_steps={max_steps}, steps/epoch={steps_per_epoch}, "
           f"warmup_steps={WARMUP_STEPS}, peak_lr={LEARNING_RATE:.2e}, "
           f"min_lr={MIN_LR:.2e}\n")
 
     for epoch in range(start_epoch, NUM_EPOCHS):
-        print(f"\nEpoche {epoch + 1}/{NUM_EPOCHS}")
+        print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
 
-        # Rolling Mid-Epoch Checkpoint Callback. Schreibt 'checkpoint_latest.pt'
-        # mit der AKTUELLEN Epoche — ein Resume beginnt diese Epoche von vorn.
-        # Ehrliche Einschraenkungen dieses simplen Schemas:
-        #   - Re-done wird alles, was in der Epoche schon gelaufen war
-        #     (im schlimmsten Fall fast eine ganze Epoche, nicht nur
-        #     save_step_interval Batches) — aber die Gewichte/Steps bleiben.
-        #   - global_step laeuft weiter -> der Cosine-Schedule verschiebt
-        #     sich relativ zu den Daten.
-        #   - DataLoader-Shuffle hat keinen festen Seed -> der Resume-Lauf
-        #     sieht eine andere Batch-Reihenfolge.
-        # Fuer exaktes Resume muesste man Sampler-State + RNG-State sichern.
+        # Rolling mid-epoch checkpoint callback. Writes 'checkpoint_latest.pt'
+        # with the CURRENT epoch — a resume restarts this epoch from the top.
+        # Honest limitations of this simple scheme:
+        #   - Everything that had already run within the epoch is re-done
+        #     (in the worst case almost a full epoch, not just
+        #     save_step_interval batches) — but the weights/steps are kept.
+        #   - global_step keeps counting -> the cosine schedule shifts
+        #     relative to the data.
+        #   - The DataLoader shuffle has no fixed seed -> the resumed run
+        #     sees a different batch order.
+        # An exact resume would require saving sampler state + RNG state.
         def save_rolling(step, current_loss, epoch=epoch):
             save_checkpoint(
                 model, optimizer, epoch, step, current_loss,
@@ -1182,13 +1184,13 @@ def main():
         val_loss = evaluate(model, val_loader, criterion, device, vocab_size,
                             amp_dtype=amp_dtype)
 
-        # Perplexity = exp(cross-entropy). Lesbarere Metrik als Loss:
-        # ppl=N bedeutet "Modell ist im Schnitt zwischen N Tokens unsicher".
-        train_ppl = math.exp(min(train_loss, 20))   # clip gegen overflow
+        # Perplexity = exp(cross-entropy). A more readable metric than loss:
+        # ppl=N means "the model is on average uncertain between N tokens".
+        train_ppl = math.exp(min(train_loss, 20))   # clip to avoid overflow
         val_ppl = math.exp(min(val_loss, 20))
         print(f"-> train: loss={train_loss:.4f}  ppl={train_ppl:.1f}")
         print(f"-> val:   loss={val_loss:.4f}  ppl={val_ppl:.1f}   "
-              f"(letzter lr={last_lr:.2e})")
+              f"(last lr={last_lr:.2e})")
 
         if (epoch + 1) % CHECKPOINT_EVERY_N_EPOCHS == 0:
             save_checkpoint(

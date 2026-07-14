@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Die Setzmaschine — ein selbstgebautes Sprachmodell</title>
+<title>Die Setzmaschine — a language model built from scratch</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,900&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
@@ -30,7 +30,7 @@
     line-height: 1.65;
     min-height: 100vh;
   }
-  /* Papierkorn */
+  /* Paper grain */
   body::before {
     content: "";
     position: fixed; inset: 0;
@@ -40,7 +40,7 @@
   }
   main { position: relative; z-index: 2; max-width: 780px; margin: 0 auto; padding: 3.5rem 1.5rem 5rem; }
 
-  /* ————— Kopf ————— */
+  /* ————— Header ————— */
   header { border-bottom: 3px double var(--tinte); padding-bottom: 1.75rem; margin-bottom: 2.5rem; }
   .vorspann {
     display: flex; justify-content: space-between; align-items: baseline;
@@ -61,14 +61,14 @@
     font-size: 1.05rem; color: var(--tinte-blass); margin-top: 0.9rem;
   }
 
-  /* Spezimen-Zeile: Fakten wie auf einem Schriftmusterblatt */
+  /* Specimen row: facts laid out like on a type specimen sheet */
   .spezimen {
     display: flex; flex-wrap: wrap; gap: 0 2.2rem;
     margin: 1.4rem 0 0; font-size: 0.78rem; color: var(--tinte-blass);
   }
   .spezimen b { color: var(--tinte); font-weight: 500; }
 
-  /* ————— Hinweis ————— */
+  /* ————— Notice box ————— */
   .hinweis {
     border-left: 3px solid var(--rubrik);
     padding: 0.65rem 1rem;
@@ -78,7 +78,7 @@
   }
   .hinweis b { color: var(--rubrik); }
 
-  /* ————— Eingabe ————— */
+  /* ————— Input ————— */
   label {
     display: block; font-size: 0.72rem; letter-spacing: 0.18em;
     text-transform: uppercase; color: var(--tinte-blass); margin-bottom: 0.6rem;
@@ -107,7 +107,7 @@
   button:active { transform: translateY(1px); }
   button:disabled { background: var(--linie); cursor: wait; }
 
-  /* Setzproben */
+  /* Sample prompts ("Setzproben") */
   .proben { margin-top: 1.1rem; font-size: 0.82rem; color: var(--tinte-blass); }
   .proben span { margin-right: 0.4rem; }
   .probe {
@@ -117,7 +117,7 @@
   }
   .probe:hover { color: var(--rubrik); }
 
-  /* ————— Ausgabe: das gesetzte Blatt ————— */
+  /* ————— Output: the typeset sheet ————— */
   #blatt {
     margin-top: 2.6rem;
     background: #fbf8f0;
@@ -131,7 +131,7 @@
   #blatt.sichtbar { display: block; animation: einzug 0.35s ease-out; }
   @keyframes einzug { from { opacity: 0; transform: translateY(8px); } }
   #blatt::before {
-    content: "SATZ Nº " attr(data-nr);
+    content: "SETTING Nº " attr(data-nr);
     position: absolute; top: -0.62rem; left: 1.4rem;
     background: var(--rubrik); color: var(--papier);
     font-size: 0.62rem; letter-spacing: 0.22em; padding: 0.15rem 0.6rem;
@@ -151,7 +151,7 @@
   }
   .fehler { color: var(--rubrik); }
 
-  /* ————— Fuß ————— */
+  /* ————— Footer ————— */
   footer {
     margin-top: 3.5rem; padding-top: 1.2rem;
     border-top: 1px solid var(--linie);
@@ -170,33 +170,34 @@
 <main>
   <header>
     <div class="vorspann">
-      <span>Werkstattstück · Deutsch</span>
-      <span class="rot" id="modellgroesse">— M Parameter</span>
+      <span>Workshop piece · German-language</span>
+      <span class="rot" id="modellgroesse">— M parameters</span>
     </div>
     <h1>Die Setzmaschine<span class="punkt">.</span></h1>
-    <p class="untertitel">Ein Sprachmodell, von Hand gebaut und von Grund auf trainiert — kein fremdes Modell, keine fremde API.</p>
+    <p class="untertitel">A language model, built by hand and trained from scratch — no third-party model, no third-party API.</p>
     <div class="spezimen" id="spezimen">
-      <span>Architektur <b>GPT-Decoder</b></span>
-      <span>Schichten <b id="sp-layer">–</b></span>
-      <span>Köpfe <b id="sp-heads">–</b></span>
-      <span>Training <b>dt. Wikipedia + Web + Code</b></span>
+      <span>Architecture <b>GPT decoder</b></span>
+      <span>Layers <b id="sp-layer">–</b></span>
+      <span>Heads <b id="sp-heads">–</b></span>
+      <span>Training <b>German Wikipedia + web + code</b></span>
     </div>
   </header>
 
   <div class="hinweis">
-    <b>Zur Einordnung:</b> Dies ist ein <b>Basismodell</b> — es beantwortet keine Fragen,
-    es <em>schreibt Text weiter</em>. Gib einen Satzanfang vor. Und: Es erfindet Fakten
-    munter dazu. Das ist bei dieser Größe keine Schwäche, sondern Physik.
+    <b>For context:</b> This is a <b>base model</b> — it does not answer questions,
+    it <em>continues text</em>. Give it the start of a sentence, in German (the only
+    language it speaks). And: it cheerfully makes up facts. At this size, that is
+    not a flaw — it is physics.
   </div>
 
-  <label for="prompt">Satzanfang setzen</label>
+  <label for="prompt">Set a sentence opener (in German)</label>
   <div class="eingabe">
     <textarea id="prompt" rows="2" maxlength="500"
       placeholder="Die Hauptstadt von Frankreich"></textarea>
-    <button id="los">Weiterschreiben</button>
+    <button id="los">Continue writing</button>
   </div>
   <div class="proben">
-    <span>Setzproben:</span><!--
+    <span>Sample settings (the model only speaks German):</span><!--
     --><a class="probe">Die Geschichte der Stadt</a><!--
     --><a class="probe">Ein Vulkan ist</a><!--
     --><a class="probe">Im Jahr 1989</a><!--
@@ -209,9 +210,9 @@
   </div>
 
   <footer>
-    Gebaut als Lernprojekt: Transformer, Training und diese Seite aus eigener Hand.
-    Quellcode auf <a href="https://github.com/b3rtram/transformer-test">GitHub</a>.
-    Läuft auf CPU — eine Generierung dauert einige Sekunden. Nº zählt die Sätze dieser Sitzung.
+    Built as a learning project: the transformer, the training, and this page — all by hand.
+    Source code on <a href="https://github.com/b3rtram/transformer-test">GitHub</a>.
+    Runs on CPU — a generation takes a few seconds. Nº counts this session's settings.
   </footer>
 </main>
 
@@ -226,7 +227,7 @@
   let satzNr = 0;
 
   fetch("/info").then(r => r.json()).then(i => {
-    document.getElementById("modellgroesse").textContent = `${i.params_mio} M Parameter`;
+    document.getElementById("modellgroesse").textContent = `${i.params_mio} M parameters`;
     document.getElementById("sp-layer").textContent = i.num_layers;
     document.getElementById("sp-heads").textContent = i.num_heads;
   }).catch(() => {});
@@ -248,12 +249,12 @@
     if (!prompt || els.los.disabled) return;
 
     els.los.disabled = true;
-    els.los.textContent = "setzt …";
+    els.los.textContent = "setting …";
     els.blatt.classList.add("sichtbar");
     els.blatt.dataset.nr = ++satzNr;
     els.text.innerHTML = `<span class="prompt"></span><span class="fort"></span><span class="caret"></span>`;
     els.text.querySelector(".prompt").textContent = prompt;
-    els.stats.textContent = "Die Maschine setzt — auf CPU dauert das einen Moment …";
+    els.stats.textContent = "The machine is setting type — on a CPU this takes a moment …";
 
     try {
       const res = await fetch("/generate", {
@@ -264,7 +265,7 @@
       if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText);
       const data = await res.json();
 
-      // Tipp-Effekt: die Fortsetzung Zeichen für Zeichen einlaufen lassen
+      // Typing effect: feed in the continuation character by character
       const ziel = els.text.querySelector(".fort");
       const zeichen = [...data.continuation];
       let i = 0;
@@ -278,13 +279,13 @@
       });
       els.text.querySelector(".caret").remove();
       els.stats.textContent =
-        `${data.seconds} s · ${data.tokens_per_s} Tokens/s · Temperatur 0,8 · top-p 0,9`;
+        `${data.seconds} s · ${data.tokens_per_s} tokens/s · temperature 0.8 · top-p 0.9`;
     } catch (err) {
       els.text.querySelector(".caret")?.remove();
-      els.stats.innerHTML = `<span class="fehler">Setzfehler: ${err.message}</span>`;
+      els.stats.innerHTML = `<span class="fehler">Typesetting error: ${err.message}</span>`;
     } finally {
       els.los.disabled = false;
-      els.los.textContent = "Weiterschreiben";
+      els.los.textContent = "Continue writing";
     }
   }
 </script>

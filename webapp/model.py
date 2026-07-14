@@ -1,8 +1,8 @@
-"""Schlanke Inferenz-Kopie der Modell-Architektur aus train.py.
+"""Lean inference-only copy of the model architecture from train.py.
 
-Bewusst dupliziert statt importiert: train.py zieht datasets/numpy und
-Trainings-Code mit — der Demo-Container braucht nur torch + tiktoken.
-Die Klassen sind 1:1 kompatibel zum state_dict aus export_weights.py.
+Deliberately duplicated instead of imported: train.py drags in datasets/numpy
+and training code — the demo container only needs torch + tiktoken.
+The classes are 1:1 compatible with the state_dict from export_weights.py.
 """
 
 import math

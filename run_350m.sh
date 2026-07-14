@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# Hauptlauf: ~355M Parameter (GPT-2-medium-Klasse) auf ~10 Mrd. Tokens.
+# Main run: ~355M parameters (GPT-2-medium class) on ~10 billion tokens.
 #
-# VORHER auf der Instanz ausfuehren (einmalig, dauert einige Stunden):
-#   python prepare_data.py          # baut shards/ (~20 GB, FineWeb2 + Wiki)
+# BEFORE this, run on the instance (once, takes several hours):
+#   python prepare_data.py          # builds shards/ (~20 GB, FineWeb2 + Wiki)
 #
-# Architektur: d_model=1024, 24 Layer, 16 Heads (GPT-2 medium Shape).
-# D_FF=2752: SwiGLU-Konvention (2/3)*4*d_model ~ 2731, aufgerundet auf ein
-# Vielfaches von 64 (GPU-freundliche Matrixgroessen).
+# Architecture: d_model=1024, 24 layers, 16 heads (GPT-2 medium shape).
+# D_FF=2752: SwiGLU convention (2/3)*4*d_model ~ 2731, rounded up to a
+# multiple of 64 (GPU-friendly matrix sizes).
 #
-# DROPOUT=0.0: bei EINEM Pass ueber 10 Mrd. frische Tokens sieht das Modell
-# jedes Beispiel genau einmal — Overfitting ist strukturell unmoeglich,
-# Dropout wuerde nur Kapazitaet verschenken (Llama-Recipe).
+# DROPOUT=0.0: with ONE pass over 10 billion fresh tokens the model sees
+# every example exactly once — overfitting is structurally impossible,
+# dropout would only throw away capacity (Llama recipe).
 #
-# LR 3e-4: grosse Modelle brauchen kleinere Peak-LRs (GPT-2 medium Standard).
-# WARMUP 2000: laengerer Anlauf fuer den groesseren Parameterraum.
+# LR 3e-4: large models need smaller peak LRs (GPT-2 medium standard).
+# WARMUP 2000: longer ramp-up for the larger parameter space.
 #
-# Effektiv: 8 x 8 = 64 Sequenzen x 1024 Tokens = 65.536 Tokens/Step.
-# 10 Mrd. Tokens / 65k = ~150.000 Steps -> je nach Host ~4-6 Tage auf einer
-# RTX 4090. Rolling-Checkpoint alle 2000 Steps sichert den Fortschritt.
+# Effective: 8 x 8 = 64 sequences x 1024 tokens = 65,536 tokens/step.
+# 10 billion tokens / 65k = ~150,000 steps -> depending on the host, ~4-6
+# days on an RTX 4090. Rolling checkpoint every 2000 steps saves progress.
 #
-# Bei "CUDA out of memory": BATCH_SIZE=4 GRAD_ACCUM_STEPS=16.
+# On "CUDA out of memory": BATCH_SIZE=4 GRAD_ACCUM_STEPS=16.
 set -euo pipefail
 
 D_MODEL=1024 NUM_HEADS=16 NUM_LAYERS=24 D_FF=2752 \

@@ -1,22 +1,22 @@
-"""Mini-Inferenz-Server fuer das Chat-Terminal (terminal/).
+"""Mini inference server for the chat terminal (terminal/).
 
-Warum ein Server statt Modell-Laden pro Anfrage: der Checkpoint ist ~1,5 GB
-und das Laden dauert Sekunden. Der Server laedt EINMAL und haelt das Modell
-im Speicher — die Terminal-UI kann beliebig oft neu starten und fragt nur
-per HTTP an. Bewusst nur Python-Stdlib (http.server), keine neuen Deps.
+Why a server instead of loading the model per request: the checkpoint is
+~1.5 GB and loading takes seconds. The server loads ONCE and keeps the model
+in memory — the terminal UI can restart as often as it likes and only talks
+to it over HTTP. Deliberately Python stdlib only (http.server), no new deps.
 
 Start:
-    CHAT_TEMPLATE=1 python chat_server.py          # nimmt sft_540m_v2.pt
-    CHECKPOINT=andere_datei.pt python chat_server.py
+    CHAT_TEMPLATE=1 python chat_server.py          # uses sft_540m_v2.pt
+    CHECKPOINT=other_file.pt python chat_server.py
 
-Endpunkte:
-    GET  /info      -> Modell-Metadaten (Parameter, Device, Config)
+Endpoints:
+    GET  /info      -> model metadata (parameters, device, config)
     POST /generate  -> {"prompt": "...", "max_new_tokens": 80, ...}
                     -> {"text": "...", "seconds": 1.2, "tokens_per_s": 55.0}
 
-Die Modell-Dimensionen kommen aus dem Checkpoint selbst (config-Dict) —
-derselbe Server funktioniert also unveraendert fuer das 124M- und spaeter
-das 540M-Modell.
+The model dimensions come from the checkpoint itself (config dict) —
+so the same server works unchanged for the 124M model and later for
+the 540M one.
 """
 
 import json
@@ -32,33 +32,37 @@ import train
 CHECKPOINT = os.environ.get("CHECKPOINT", "sft_540m_v2.pt")
 PORT = int(os.environ.get("PORT", "8123"))
 
-# Sampling-Defaults — die UI kann jeden Wert pro Anfrage ueberschreiben.
+# Sampling defaults — the UI can override every value per request.
 DEFAULTS = dict(max_new_tokens=80, temperature=0.8, top_p=0.9,
                 repetition_penalty=1.2)
 
-# Chat-Modus (CHAT_TEMPLATE=1): fuer SFT-Checkpoints. Wickelt die Eingabe
-# in das Trainings-Template und stoppt am <|endoftext|>. Beim Basismodell
-# aus lassen — es kennt weder das Template noch das Aufhoeren.
+# Chat mode (CHAT_TEMPLATE=1): for SFT checkpoints. Wraps the input in the
+# training template and stops at <|endoftext|>. Leave it off for the base
+# model — it knows neither the template nor when to stop.
 CHAT_TEMPLATE = os.environ.get("CHAT_TEMPLATE", "0").lower() in ("1", "true")
+# CRITICAL: this template ("### Frage" / "### Antwort", German for
+# question/answer) is baked into the trained SFT model weights — the model
+# was fine-tuned on exactly these marker strings. Do NOT translate or alter
+# it, or the model will stop following the chat format.
 PROMPT_TMPL = "### Frage:\n{frage}\n\n### Antwort:\n"
 
 
 def load_model():
     device = train.get_device()
-    print(f"Lade {CHECKPOINT} auf {device}...")
+    print(f"Loading {CHECKPOINT} on {device}...")
     ckpt = torch.load(CHECKPOINT, map_location=device, weights_only=False)
     cfg = ckpt["config"]
     model = train.GPTDecoder(
         vocab_size=cfg["vocab_size"], d_model=cfg["d_model"],
         num_heads=cfg["num_heads"], d_ff=cfg["d_ff"],
-        num_layers=cfg["num_layers"], dropout=0.0,  # Inferenz: kein Dropout
+        num_layers=cfg["num_layers"], dropout=0.0,  # inference: no dropout
     ).to(device)
     sd = {k.removeprefix("_orig_mod."): v
           for k, v in ckpt["model_state_dict"].items()}
     model.load_state_dict(sd)
     model.eval()
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Bereit: {n_params:,} Parameter, val-Loss beim Training: "
+    print(f"Ready: {n_params:,} parameters, val loss at training time: "
           f"{ckpt.get('loss', float('nan')):.3f}")
     return model, cfg, device, n_params
 
@@ -77,11 +81,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, *args):
-        pass  # kein Request-Log-Spam im Terminal
+        pass  # no request-log spam in the terminal
 
     def do_GET(self):
         if self.path != "/info":
-            return self._send(404, {"error": "unbekannter Pfad"})
+            return self._send(404, {"error": "unknown path"})
         self._send(200, {
             "checkpoint": CHECKPOINT,
             "params": N_PARAMS,
@@ -93,14 +97,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path != "/generate":
-            return self._send(404, {"error": "unbekannter Pfad"})
+            return self._send(404, {"error": "unknown path"})
         try:
             length = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(length))
             prompt = req["prompt"]
             opts = {**DEFAULTS, **{k: req[k] for k in DEFAULTS if k in req}}
         except (KeyError, ValueError, json.JSONDecodeError) as e:
-            return self._send(400, {"error": f"kaputte Anfrage: {e}"})
+            return self._send(400, {"error": f"malformed request: {e}"})
 
         model_input = (PROMPT_TMPL.format(frage=prompt)
                        if CHAT_TEMPLATE else prompt)
@@ -118,7 +122,7 @@ class Handler(BaseHTTPRequestHandler):
         new_tokens = out.size(1) - ids.size(1)
         text = ENC.decode(out[0].cpu().tolist())
         if CHAT_TEMPLATE:
-            # Nur die Antwort zurueckgeben, ohne Template und EOT.
+            # Return only the answer, without the template and the EOT token.
             text = (text[len(model_input):]
                     .replace("<|endoftext|>", "").strip())
         self._send(200, {
@@ -129,5 +133,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Chat-Server auf http://127.0.0.1:{PORT}  (Ctrl-C beendet)")
+    print(f"Chat server at http://127.0.0.1:{PORT}  (Ctrl-C to stop)")
     HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

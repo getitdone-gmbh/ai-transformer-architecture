@@ -1,34 +1,34 @@
-"""Streaming-Datenaufbereitung: Quellen -> tokenisierte uint16-Shards.
+"""Streaming data preparation: sources -> tokenized uint16 shards.
 
-Fuer den grossen Lauf (350M @ ~10 Mrd. Tokens) funktioniert der alte Weg
-(alles herunterladen -> ein Token-Tensor im RAM) nicht mehr:
-  - Rohdaten (~40-60 GB Text) sollen nie komplett auf der Disk liegen.
-  - 10 Mrd. Tokens passen in keinen RAM, wenn man sie als Liste baut.
+For the large run (350M @ ~10 billion tokens) the old approach
+(download everything -> one token tensor in RAM) no longer works:
+  - Raw data (~40-60 GB of text) should never sit fully on disk.
+  - 10 billion tokens fit in no RAM if you build them as a list.
 
-Deshalb der Standard-Ansatz (nanoGPT / GPT-2-Replikationen):
-  1. Quellen STREAMEN (HuggingFace streaming=True laedt haeppchenweise),
-  2. on-the-fly tokenisieren (tiktoken, multi-threaded),
-  3. als flache uint16-Binaer-Shards schreiben (~100M Tokens = ~200 MB je).
+Hence the standard approach (nanoGPT / GPT-2 replications):
+  1. STREAM the sources (HuggingFace streaming=True loads in chunks),
+  2. tokenize on the fly (tiktoken, multi-threaded),
+  3. write as flat uint16 binary shards (~100M tokens = ~200 MB each).
 
-Warum uint16: GPT-2-Vocab hat 50.257 IDs < 65.536 -> 2 Bytes/Token statt 4.
-10 Mrd. Tokens = ~20 GB auf Disk. Das Training liest die Shards spaeter per
-np.memmap — es laedt also NIE alles in den RAM (siehe ShardDataset in
+Why uint16: the GPT-2 vocab has 50,257 IDs < 65,536 -> 2 bytes/token instead
+of 4. 10 billion tokens = ~20 GB on disk. The training later reads the shards
+via np.memmap — so it NEVER loads everything into RAM (see ShardDataset in
 train.py).
 
-Neu gegenueber der alten Pipeline: zwischen Dokumenten steht das
-<|endoftext|>-Token. Ohne Trenner kleben Artikel uebergangslos aneinander
-und das Modell lernt nie, dass ein Kontext-Reset existiert.
+New compared to the old pipeline: the <|endoftext|> token sits between
+documents. Without a separator, articles stick together seamlessly and the
+model never learns that a context reset exists.
 
-Konfiguration per ENV (alle optional):
-  FINEWEB_TOKENS=8e9   Token-Budget aus FineWeb2-Deutsch (0 = Quelle aus)
-  WIKI_TOKENS=2e9      Token-Budget aus Wikipedia-DE     (0 = Quelle aus)
-  SHARD_TOKENS=1e8     Tokens pro Shard-Datei
-  SHARD_DIR=shards     Ausgabe-Verzeichnis
+Configuration via ENV (all optional):
+  FINEWEB_TOKENS=8e9   token budget from FineWeb2-German (0 = source off)
+  WIKI_TOKENS=2e9      token budget from Wikipedia-DE    (0 = source off)
+  SHARD_TOKENS=1e8     tokens per shard file
+  SHARD_DIR=shards     output directory
 
-Resume: der Fortschritt steht in shards/manifest.json (inkl. Dokument-
-Zaehler pro Shard). Nach einem Abbruch werden fertige Shards behalten und
-der Stream per dataset.skip(n_docs) vorgespult — es wird nur neu
-heruntergeladen, nicht neu tokenisiert.
+Resume: the progress lives in shards/manifest.json (incl. document counter
+per shard). After an abort, finished shards are kept and the stream is
+fast-forwarded via dataset.skip(n_docs) — only the download is redone,
+not the tokenization.
 """
 
 import json
@@ -47,22 +47,22 @@ def _env(name, default, cast=str):
     return cast(raw)
 
 
-# int(float(...)): erlaubt "8e9"-Schreibweise in der ENV-Var.
+# int(float(...)): allows "8e9" notation in the ENV var.
 FINEWEB_TOKENS = int(_env("FINEWEB_TOKENS", 7e9, float))
 WIKI_TOKENS = int(_env("WIKI_TOKENS", 2e9, float))
 CODE_TOKENS = int(_env("CODE_TOKENS", 1e9, float))
 SHARD_TOKENS = int(_env("SHARD_TOKENS", 1e8, float))
 SHARD_DIR = _env("SHARD_DIR", "shards")
-DOCS_PER_BATCH = 512   # Dokumente pro encode_ordinary_batch-Aufruf
+DOCS_PER_BATCH = 512   # documents per encode_ordinary_batch call
 
-# Quellen-Definitionen: (name, token_budget, load_dataset-kwargs, text_feld).
-#   - FineWeb2: qualitaetsgefiltertes, dedupliziertes Web-Deutsch — der
-#     moderne Pretraining-Standard. Diversitaet (Dialog, Anleitung, Erzaehlung).
-#   - Wikipedia: sauber und faktenreich, aber stilistisch eintoenig.
-#   - Python-Code (~10 % des Mixes): Code ist der logisch dichteste Text —
-#     verschachtelte Strukturen, exakte Referenzen. Verbessert nachweislich
-#     auch Sprach-/Struktur-Faehigkeiten UND haelt die Tuer fuer spaetere
-#     Coding-Aufsaetze offen. CODE_TOKENS=0 schaltet die Quelle ab.
+# Source definitions: (name, token_budget, load_dataset kwargs, text_field).
+#   - FineWeb2: quality-filtered, deduplicated web German — the modern
+#     pretraining standard. Diversity (dialogue, instruction, narrative).
+#   - Wikipedia: clean and fact-rich, but stylistically monotonous.
+#   - Python code (~10% of the mix): code is the logically densest text —
+#     nested structures, exact references. It demonstrably improves
+#     language/structure abilities too AND keeps the door open for later
+#     coding efforts. CODE_TOKENS=0 turns the source off.
 SOURCES = [
     ("fineweb", FINEWEB_TOKENS,
      dict(path="HuggingFaceFW/fineweb-2", name="deu_Latn", split="train"), "text"),
@@ -74,12 +74,12 @@ SOURCES = [
 
 
 class ShardWriter:
-    """Sammelt Token-Arrays und schreibt volle Shards + Manifest.
+    """Collects token arrays and writes full shards + manifest.
 
-    Das Manifest wird nach JEDEM Shard atomar neu geschrieben (tmp +
-    os.replace) — bricht der Job ab, ist der letzte Stand konsistent und
-    der Resume weiss exakt, wie viele Dokumente jeder Quelle verarbeitet
-    sind.
+    The manifest is rewritten atomically after EVERY shard (tmp +
+    os.replace) — if the job aborts, the last state is consistent and
+    the resume knows exactly how many documents of each source have
+    been processed.
     """
 
     def __init__(self, out_dir, shard_tokens):
@@ -97,12 +97,12 @@ class ShardWriter:
                 "eot_between_docs": True,
                 "shards": [],
             }
-        self._buffer = []       # Liste von np.uint16-Arrays
-        self._buffered = 0      # Tokens im Buffer
+        self._buffer = []       # list of np.uint16 arrays
+        self._buffered = 0      # tokens in the buffer
         self._buffered_docs = 0
 
     def source_progress(self, source):
-        """(tokens, docs) die fuer diese Quelle schon in Shards liegen."""
+        """(tokens, docs) that already lie in shards for this source."""
         toks = sum(s["num_tokens"] for s in self.manifest["shards"]
                    if s["source"] == source)
         docs = sum(s["num_docs"] for s in self.manifest["shards"]
@@ -119,22 +119,22 @@ class ShardWriter:
             self._write_shard(source)
 
     def finish_source(self, source):
-        """Rest-Buffer als (kleineren) Abschluss-Shard schreiben."""
+        """Write the remaining buffer as a (smaller) closing shard."""
         if self._buffered > 0:
             self._write_shard(source, partial_ok=True)
 
     def _write_shard(self, source, partial_ok=False):
-        # Genau shard_tokens abschneiden; der Rest bleibt im Buffer.
-        # (Beim Abschluss-Shard: alles was da ist.)
+        # Cut off exactly shard_tokens; the rest stays in the buffer.
+        # (For the closing shard: everything that is there.)
         take = self._buffered if partial_ok else self.shard_tokens
         chunks, got, docs = [], 0, 0
         while self._buffer and got < take:
             arr = self._buffer.pop(0)
             if got + arr.size > take:
-                # Dokument ueberschreitet die Shard-Grenze: splitten, Rest
-                # zurueck in den Buffer. Der Doc-Zaehler bucht das Dokument
-                # dem Shard zu, in dem es ENDET — nur so stimmt die Summe
-                # fuer den Resume-Skip.
+                # Document exceeds the shard boundary: split it, put the
+                # rest back into the buffer. The doc counter attributes the
+                # document to the shard in which it ENDS — only that way is
+                # the sum correct for the resume skip.
                 head, tail = arr[: take - got], arr[take - got:]
                 chunks.append(head)
                 got += head.size
@@ -157,25 +157,25 @@ class ShardWriter:
             json.dump(self.manifest, f, indent=1)
         os.replace(tmp, self.manifest_path)
         total = sum(s["num_tokens"] for s in self.manifest["shards"])
-        print(f"  Shard geschrieben: {fname} ({got:,} Tokens, {docs:,} Docs) "
-              f"— gesamt {total:,} Tokens")
+        print(f"  Shard written: {fname} ({got:,} tokens, {docs:,} docs) "
+              f"— total {total:,} tokens")
 
 
 def build_source(writer, source, target_tokens, ds_kwargs, encoding, eot,
                  text_key="text"):
     done_tokens, done_docs = writer.source_progress(source)
     if done_tokens >= target_tokens:
-        print(f"[{source}] bereits fertig ({done_tokens:,} Tokens) — skip")
+        print(f"[{source}] already finished ({done_tokens:,} tokens) — skip")
         return
-    print(f"[{source}] Ziel {target_tokens:,} Tokens "
-          f"(vorhanden: {done_tokens:,}) — streame...")
+    print(f"[{source}] target {target_tokens:,} tokens "
+          f"(available: {done_tokens:,}) — streaming...")
 
     ds = load_dataset(streaming=True, **ds_kwargs)
     if done_docs > 0:
-        # Resume: Dokumente ueberspringen, die schon in Shards liegen.
-        # skip() spult den Stream vor — Download laeuft nochmal durch,
-        # aber die teure Tokenisierung nicht.
-        print(f"[{source}] Resume: ueberspringe {done_docs:,} Dokumente")
+        # Resume: skip documents that already lie in shards.
+        # skip() fast-forwards the stream — the download runs through
+        # again, but the expensive tokenization does not.
+        print(f"[{source}] Resume: skipping {done_docs:,} documents")
         ds = ds.skip(done_docs)
 
     n_threads = os.cpu_count() or 4
@@ -187,9 +187,9 @@ def build_source(writer, source, target_tokens, ds_kwargs, encoding, eot,
     def process(texts):
         nonlocal produced
         for toks in encoding.encode_ordinary_batch(texts, num_threads=n_threads):
-            # Budget-Check pro DOKUMENT, nicht pro Batch: ein 512-Artikel-
-            # Batch kann Millionen Tokens gross sein — ohne diesen Check
-            # wuerde das Budget um bis zu einen ganzen Batch ueberschossen.
+            # Budget check per DOCUMENT, not per batch: a 512-article
+            # batch can be millions of tokens large — without this check
+            # the budget would be overshot by up to a whole batch.
             if produced >= target_tokens:
                 break
             arr = np.asarray(toks + [eot], dtype=np.uint16)
@@ -207,19 +207,19 @@ def build_source(writer, source, target_tokens, ds_kwargs, encoding, eot,
             if produced >= next_log:
                 rate = (produced - done_tokens) / max(1e-9, time.time() - t0)
                 eta_min = (target_tokens - produced) / max(1e-9, rate) / 60
-                print(f"  [{source}] {produced:,}/{target_tokens:,} Tokens "
+                print(f"  [{source}] {produced:,}/{target_tokens:,} tokens "
                       f"({rate / 1e6:.1f}M tok/s, ETA {eta_min:.0f} min)")
                 next_log = produced + 10_000_000
     else:
-        # Stream zu Ende, bevor das Budget erreicht war (z.B. ganze
-        # Wikipedia < WIKI_TOKENS): Rest verarbeiten und ehrlich loggen.
+        # Stream ended before the budget was reached (e.g. all of
+        # Wikipedia < WIKI_TOKENS): process the rest and log it honestly.
         if batch:
             process(batch)
-        print(f"  [{source}] Quelle erschoepft bei {produced:,} Tokens "
-              f"(Ziel war {target_tokens:,})")
+        print(f"  [{source}] source exhausted at {produced:,} tokens "
+              f"(target was {target_tokens:,})")
 
     writer.finish_source(source)
-    print(f"[{source}] fertig: {writer.source_progress(source)[0]:,} Tokens")
+    print(f"[{source}] finished: {writer.source_progress(source)[0]:,} tokens")
 
 
 def main():
@@ -227,7 +227,7 @@ def main():
     eot = encoding.eot_token  # <|endoftext|>, ID 50256
 
     planned = sum(t for _, t, _, _ in SOURCES)
-    print(f"Plan: {planned:,} Tokens -> ~{planned * 2 / 1024**3:.1f} GB "
+    print(f"Plan: {planned:,} tokens -> ~{planned * 2 / 1024**3:.1f} GB "
           f"in '{SHARD_DIR}/' (uint16)")
 
     writer = ShardWriter(SHARD_DIR, SHARD_TOKENS)
@@ -238,8 +238,8 @@ def main():
                      text_key=text_key)
 
     total = sum(s["num_tokens"] for s in writer.manifest["shards"])
-    print(f"\nFertig: {total:,} Tokens in {len(writer.manifest['shards'])} Shards.")
-    print(f"Training startet mit: SHARD_MANIFEST={SHARD_DIR}/manifest.json")
+    print(f"\nDone: {total:,} tokens in {len(writer.manifest['shards'])} shards.")
+    print(f"Training starts with: SHARD_MANIFEST={SHARD_DIR}/manifest.json")
 
 
 if __name__ == "__main__":

@@ -1,106 +1,109 @@
-# Vast.ai Runbook — 124M Basismodell trainieren
+# Vast.ai Runbook — Training the Base Model
 
-Ziel: ein ~124M-Parameter-Modell (GPT-2-small-Klasse) auf deutscher Wikipedia
-trainieren, um es danach als Sandbox für Kompression (Pruning, Quantisierung,
-…) zu benutzen.
+Goal: train a base model on German data so we can then use it as a
+sandbox for compression (pruning, quantization, …). The walkthrough
+below uses the 124M run (GPT-2-small class, `run_124m.sh`) — the larger
+presets (`run_350m.sh`, `run_500m.sh`) work identically, but they need
+`prepare_data.py` (shard pipeline) beforehand and a stronger GPU;
+details are in the comments of each run script.
 
-## 1. Instanz wählen
+## 1. Choose an instance
 
-Auf <https://vast.ai> eine GPU-Instanz mieten:
+Rent a GPU instance on <https://vast.ai>:
 
-- **GPU:** RTX 4090 (24 GB) reicht locker. Alternativ RTX 3090 / A100 40GB.
-- **Disk:** mindestens **50 GB** — die deutsche Wikipedia lädt als Dump
-  (~6–7 GB) herunter, plus Token-Cache (~1–2 GB) und Checkpoints (~1,4 GB je).
-- **Image / Template:** ein PyTorch-Template mit CUDA (z.B. "PyTorch (cuDNN)"
-  oder `pytorch/pytorch`). Wir brauchen nur zusätzlich `tiktoken` + `datasets`.
-- **On-Demand** genügt; Interruptible ist billiger, aber der Lauf kann
-  abbrechen (unser Checkpoint-System fängt das ab — `checkpoint_latest.pt`).
+- **GPU:** an RTX 4090 (24 GB) is plenty. Alternatively RTX 3090 / A100 40GB.
+- **Disk:** at least **50 GB** — the German Wikipedia downloads as a dump
+  (~6–7 GB), plus token cache (~1–2 GB) and checkpoints (~1.4 GB each).
+- **Image / Template:** a PyTorch template with CUDA (e.g. "PyTorch (cuDNN)"
+  or `pytorch/pytorch`). All we need on top is `tiktoken` + `datasets`.
+- **On-Demand** is fine; Interruptible is cheaper, but the run can get
+  killed (our checkpoint system covers that — `checkpoint_latest.pt`).
 
-Grobe Kosten: RTX 4090 ~0,3–0,5 $/h → ein 400k-Artikel-Lauf über 1 Epoche
-dauert ~3–6 h → **rund 2–4 $**.
+Rough cost: RTX 4090 ~$0.3–0.5/h → a 400k-article run over 1 epoch
+takes ~3–6 h → **about $2–4**.
 
-## 2. Verbinden
+## 2. Connect
 
-Vast.ai zeigt eine SSH-Zeile, z.B.:
+Vast.ai shows an SSH line, e.g.:
 
 ```bash
 ssh -p <PORT> root@<HOST>
 ```
 
-(Port + Host stehen im Vast.ai-Dashboard unter "Connect".)
+(Port + host are in the Vast.ai dashboard under "Connect".)
 
-## 3. Repo + Setup
+## 3. Repo + setup
 
-Auf der Instanz:
+On the instance:
 
 ```bash
-git clone <DEIN_REPO_URL> transformer-test   # oder per scp hochladen
+git clone <YOUR_REPO_URL> transformer-test   # or upload via scp
 cd transformer-test
-bash vastai_setup.sh                          # installiert tiktoken, datasets, numpy
+bash vastai_setup.sh                          # installs tiktoken, datasets, numpy
 ```
 
-Kein Git-Remote? Dann lokal hochladen (nur die nötigen Dateien):
+No git remote? Then upload from your local machine (only the files needed):
 
 ```bash
-# vom lokalen Rechner aus:
+# from your local machine:
 scp -P <PORT> train.py run_124m.sh vastai_setup.sh root@<HOST>:~/transformer-test/
 ```
 
-## 4. Training starten
+## 4. Start training
 
 ```bash
 bash run_124m.sh
 ```
 
-Das läuft im Vordergrund und schreibt live nach `train_124m.log`. Für einen
-Lauf, der ein SSH-Disconnect überlebt:
+This runs in the foreground and writes live to `train_124m.log`. For a
+run that survives an SSH disconnect:
 
 ```bash
 nohup bash run_124m.sh > train_124m.log 2>&1 &
-tail -f train_124m.log     # zuschauen; Ctrl-C beendet nur das tail, nicht den Lauf
+tail -f train_124m.log     # watch; Ctrl-C only kills the tail, not the run
 ```
 
-Erwartete Ausgabe am Anfang: Device `cuda`, `Parameter: 123,588,096`,
-`Effektive Batch: 16 x 3 = 48 Sequenzen`. Der erste Batch ist wegen
-`torch.compile` (JIT) langsam — danach zieht es an.
+Expected output at the start: device `cuda`, `Parameters: 123,588,096`,
+`Effective batch: 16 x 3 = 48 sequences`. The first batch is slow because
+of `torch.compile` (JIT) — after that it picks up speed.
 
-### Knöpfe (falls nötig)
+### Knobs (if needed)
 
-- **`CUDA out of memory`:** in `run_124m.sh` `BATCH_SIZE=8 GRAD_ACCUM_STEPS=6`
-  setzen (effektive Batch bleibt 48).
-- **Stärkeres Modell / mehr Daten:** `NUM_ARTICLES` hoch (bis ~2.8M = ganze
-  de-Wikipedia) und/oder `NUM_EPOCHS=2`. Achtung: 400k Artikel ≈ 200M Tokens —
-  das ist für 124M nach der Chinchilla-Regel (~2,5 Mrd. Tokens optimal) noch
-  *unterttrainiert*. Für eine reine Kompressions-Sandbox reicht es; für ein
-  wirklich starkes Modell mehr Daten geben (kostet linear mehr Zeit/Geld).
+- **`CUDA out of memory`:** in `run_124m.sh` set `BATCH_SIZE=8 GRAD_ACCUM_STEPS=6`
+  (the effective batch stays at 48).
+- **Stronger model / more data:** raise `NUM_ARTICLES` (up to ~2.8M = the entire
+  German Wikipedia) and/or `NUM_EPOCHS=2`. Note: 400k articles ≈ 200M tokens —
+  by the Chinchilla rule (~2.5 billion tokens optimal) that is still
+  *undertrained* for 124M. For a pure compression sandbox it is enough; for a
+  genuinely strong model feed it more data (costs linearly more time/money).
 
-## 5. Überwachen
+## 5. Monitor
 
 ```bash
 tail -f train_124m.log
-nvidia-smi           # GPU-Auslastung / VRAM
+nvidia-smi           # GPU utilization / VRAM
 ```
 
-Achte auf: fallenden `loss`, sinkende `val ppl` am Epochenende, und dass die
-GPU-Auslastung (`nvidia-smi`) nahe 100 % liegt (sonst ist der DataLoader der
-Flaschenhals).
+Watch for: falling `loss`, decreasing `val ppl` at the end of each epoch, and
+GPU utilization (`nvidia-smi`) close to 100% (otherwise the DataLoader is the
+bottleneck).
 
-## 6. Checkpoint zurückholen
+## 6. Retrieve the checkpoint
 
-Nach dem Lauf liegen auf der Instanz `checkpoint_epoch_1.pt` (Epochen-Ende) und
-`checkpoint_latest.pt` (rolling). **Instanz ist flüchtig — Checkpoint sichern,
-bevor du sie zerstörst:**
+After the run, the instance holds `checkpoint_epoch_1.pt` (end of epoch) and
+`checkpoint_latest.pt` (rolling). **The instance is ephemeral — save the
+checkpoint before you destroy it:**
 
 ```bash
-# vom lokalen Rechner aus:
+# from your local machine:
 scp -P <PORT> root@<HOST>:~/transformer-test/checkpoint_epoch_1.pt ./checkpoint_124m.pt
 ```
 
-Danach die Vast.ai-Instanz **zerstören** (nicht nur stoppen), sonst laufen
-Kosten weiter.
+Then **destroy** the Vast.ai instance (don't just stop it), otherwise it
+keeps accruing cost.
 
-## 7. Weiter geht's lokal
+## 7. Back to local
 
-Mit `checkpoint_124m.pt` können wir dann auf dem Mac die eigentlich spannenden
-Experimente fahren: Aktivierungs-Logging → strukturiertes Pruning →
-Quantisierung, jeweils Perplexity + Speed vorher/nachher messen.
+With `checkpoint_124m.pt` we can then run the actually interesting
+experiments on the Mac: activation logging → structured pruning →
+quantization, measuring perplexity + speed before/after each step.

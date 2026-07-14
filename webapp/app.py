@@ -1,15 +1,15 @@
-"""Öffentliche Demo: FastAPI-Service um das selbst trainierte Modell.
+"""Public demo: FastAPI service wrapping the self-trained model.
 
-Boot-Ablauf:
-  1. Gewichte von WEIGHTS_URL laden (einmalig, ~300 MB / ~1,1 GB), cachen.
-  2. Modell aus der im File mitgereisten config bauen (größenagnostisch —
-     124M heute, 540M morgen: nur WEIGHTS_URL wechseln).
-  3. fp16-Gewichte -> fp32 im RAM (CPU rechnet fp32 deutlich schneller
-     und stabiler als fp16).
+Boot sequence:
+  1. Download weights from WEIGHTS_URL (once, ~300 MB / ~1.1 GB), cache them.
+  2. Build the model from the config shipped inside the file (size-agnostic —
+     124M today, 540M tomorrow: just swap WEIGHTS_URL).
+  3. fp16 weights -> fp32 in RAM (CPUs run fp32 noticeably faster and more
+     stably than fp16).
 
-Ein threading.Lock serialisiert die Generierung: ein CPU-Container schafft
-genau eine Inferenz auf einmal — parallele Anfragen warten, statt sich
-gegenseitig die Kerne zu klauen.
+A threading.Lock serializes generation: one CPU container can handle exactly
+one inference at a time — parallel requests wait instead of stealing each
+other's cores.
 """
 
 import os
@@ -41,7 +41,7 @@ _lock = threading.Lock()
 
 def _load():
     if not os.path.exists(WEIGHTS_PATH):
-        print(f"Lade Gewichte: {WEIGHTS_URL}")
+        print(f"Downloading weights: {WEIGHTS_URL}")
         tmp = WEIGHTS_PATH + ".part"
         urllib.request.urlretrieve(WEIGHTS_URL, tmp)
         os.replace(tmp, WEIGHTS_PATH)
@@ -57,7 +57,7 @@ def _load():
     model.load_state_dict(state)
     model.eval()
     n = sum(p.numel() for p in model.parameters())
-    print(f"Modell bereit: {n:,} Parameter ({n / 1e6:.0f}M)")
+    print(f"Model ready: {n:,} parameters ({n / 1e6:.0f}M)")
     return model, cfg, n
 
 
@@ -97,12 +97,12 @@ def health():
 def generate(req: GenerateRequest):
     ids = ENC.encode(req.prompt)
     if len(ids) > MAX_PROMPT_TOKENS:
-        raise HTTPException(400, f"Prompt zu lang (max {MAX_PROMPT_TOKENS} Tokens)")
+        raise HTTPException(400, f"Prompt too long (max {MAX_PROMPT_TOKENS} tokens)")
 
     input_ids = torch.tensor([ids])
     t0 = time.time()
-    # Lock: FastAPI führt sync-Endpoints im Threadpool aus — ohne Lock
-    # würden parallele Anfragen gleichzeitig rechnen und sich ausbremsen.
+    # Lock: FastAPI runs sync endpoints in a thread pool — without the lock,
+    # parallel requests would compute simultaneously and slow each other down.
     with _lock:
         out = MODEL.generate(
             input_ids,

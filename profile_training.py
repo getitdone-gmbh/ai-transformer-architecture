@@ -1,11 +1,11 @@
-"""Kurzer Profiling-Run um die langsamsten Ops im Training zu finden.
+"""Short profiling run to find the slowest ops in training.
 
-Baut das Modell wie im Training auf, macht 5 Warmup-Batches (absorbiert
-torch.compile JIT), dann 20 profilierte Batches. Druckt die Top-Ops
-sortiert nach selbst-verbrauchter MPS-Zeit.
+Builds the model exactly as in training, runs 5 warmup batches (absorbs
+the torch.compile JIT), then 20 profiled batches. Prints the top ops
+sorted by self-consumed MPS time.
 
-Laeuft in ~30-60 Sekunden, hat keinen Einfluss auf parallel laufendes
-Training (separater Prozess).
+Runs in ~30-60 seconds and has no effect on a training run happening in
+parallel (separate process).
 """
 
 import time
@@ -34,12 +34,12 @@ def main():
     optimizer = configure_optimizer(model, LEARNING_RATE, WEIGHT_DECAY)
     criterion = nn.CrossEntropyLoss()
 
-    # Inputs simulieren (Causal-Maskierung passiert im SDPA-Kernel selbst)
+    # Simulate inputs (causal masking happens inside the SDPA kernel itself)
     x = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE, SEQ_LENGTH), device=device)
     target = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE * SEQ_LENGTH,), device=device)
 
-    # Warmup — laesst torch.compile JIT-Kompilieren
-    print(f"\nWarmup ({NUM_WARMUP} Batches, kompiliert)...")
+    # Warmup — lets torch.compile do its JIT compilation
+    print(f"\nWarmup ({NUM_WARMUP} batches, compiled)...")
     t0 = time.time()
     for i in range(NUM_WARMUP):
         optimizer.zero_grad()
@@ -48,10 +48,10 @@ def main():
         loss.backward()
         optimizer.step()
     torch.mps.synchronize()
-    print(f"  Dauer: {time.time()-t0:.2f}s (inkl. JIT-Kompilierung)")
+    print(f"  Duration: {time.time()-t0:.2f}s (incl. JIT compilation)")
 
-    # Speed-Messung (ohne Profiler)
-    print(f"\nReine Speed-Messung ({NUM_PROFILE} Batches, kein Profiler)...")
+    # Speed measurement (without the profiler)
+    print(f"\nPure speed measurement ({NUM_PROFILE} batches, no profiler)...")
     t0 = time.time()
     for _ in range(NUM_PROFILE):
         optimizer.zero_grad()
@@ -61,12 +61,12 @@ def main():
         optimizer.step()
     torch.mps.synchronize()
     elapsed = time.time() - t0
-    print(f"  {NUM_PROFILE/elapsed:.2f} Batches/sec, {NUM_PROFILE*BATCH_SIZE*SEQ_LENGTH/elapsed:.0f} Tokens/sec")
+    print(f"  {NUM_PROFILE/elapsed:.2f} batches/sec, {NUM_PROFILE*BATCH_SIZE*SEQ_LENGTH/elapsed:.0f} tokens/sec")
 
-    # Mit Profiler — auf MPS gibt es nur ProfilerActivity.CPU; der Dispatcher
-    # sieht alle Ops und misst sie inklusive der Zeit die in MPS verbracht wird
-    # (synchron mit den GPU-Calls).
-    print(f"\nProfilieren ({NUM_PROFILE} Batches)...")
+    # With the profiler — on MPS only ProfilerActivity.CPU exists; the
+    # dispatcher sees all ops and measures them including the time spent in
+    # MPS (synchronous with the GPU calls).
+    print(f"\nProfiling ({NUM_PROFILE} batches)...")
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU],
         record_shapes=False,
@@ -80,7 +80,7 @@ def main():
         torch.mps.synchronize()
 
     print("\n" + "=" * 70)
-    print("TOP-OPS NACH SELBST-CPU-ZEIT (inkl. MPS-Sync)")
+    print("TOP OPS BY SELF CPU TIME (incl. MPS sync)")
     print("=" * 70)
     print(prof.key_averages().table(
         sort_by="self_cpu_time_total",
@@ -88,7 +88,7 @@ def main():
     ))
 
     print("\n" + "=" * 70)
-    print("TOP-OPS NACH GESAMTZEIT (inkl. aufgerufene Subops)")
+    print("TOP OPS BY TOTAL TIME (incl. called sub-ops)")
     print("=" * 70)
     print(prof.key_averages().table(
         sort_by="cpu_time_total",
