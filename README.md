@@ -1,236 +1,85 @@
-# Transformer Language Model - PyTorch Implementation
+# transformer-test — a GPT trained from scratch
 
-A complete GPT-style Transformer model implemented in PyTorch with Apple Silicon (MPS) support.
+A decoder-only transformer (GPT-style) implemented and trained **from scratch in PyTorch** — no HuggingFace `transformers`, no pretrained weights. The largest run is a **540M-parameter German base model trained on ~10B tokens** (FineWeb2 + Wikipedia + Python code) on a rented H100, followed by supervised fine-tuning into a German question-answering model on an Apple M4 Max.
 
-## 🎯 Overview
+This is a learning project: the code is deliberately explicit, and the comments explain *why* each decision was made, not just what the code does. Note that the model itself speaks German — it was trained on German data, so all example prompts are (and must be) German.
 
-This project implements a Decoder-Only Transformer (similar to GPT) from scratch in PyTorch. The model is trained on German Wikipedia articles and can generate coherent text.
+## The journey
 
-### Features
+| Stage | Artifact | What happened |
+|-------|----------|---------------|
+| 1. Notebook | `transformer.ipynb` | First working model (~44M params) on 1000 Wikipedia articles — attention, causal masking, training loop, all hand-built |
+| 2. Proper training script | `train.py` + `run_124m.sh` | GPT-2-small-class model (124M) on Vast.ai, ~$2–4 per run |
+| 3. Scaling up | `prepare_data.py` + `run_350m.sh` / `run_500m.sh` | Streaming data pipeline (10B tokens as uint16 shards), 540M main run on an H100 (~1.5 days, ~$70) |
+| 4. Fine-tuning | `sft.py` + `run_sft.sh` | SFT on German instruction data with loss masking — turns the text continuator into an answer generator |
+| 5. Serving | `chat_server.py`, `terminal/`, `webapp/` | Local inference server + Ink terminal UI, plus a public CPU demo (FastAPI) |
 
-- ✅ **Multi-Head Attention** with Scaled Dot-Product Attention
-- ✅ **Positional Encoding** for sequence information
-- ✅ **Causal Masking** for autoregressive text generation
-- ✅ **Layer Normalization** and Residual Connections
-- ✅ **Apple Silicon GPU Support** (MPS Backend)
-- ✅ **Checkpoint System** for saving/loading models
-- ✅ **Text Generation** with Temperature Sampling
+## Architecture
 
-## 🏗️ Model Architecture
+Modern GPT recipe, built up piece by piece in `train.py`:
+
+- Decoder-only transformer, **pre-LayerNorm** with **RMSNorm**
+- **Rotary position embeddings (RoPE)** with an oversized buffer (4096) for context extrapolation experiments
+- **SwiGLU** feed-forward (Llama-style, 3 matrices)
+- Tied input/output embeddings
+- GPT-2 tokenizer via `tiktoken` (vocab 50,257 — tokens fit in uint16)
+- bf16 autocast, `torch.compile`, gradient accumulation, cosine LR schedule with warmup, AdamW with selective weight decay
+- Runs on CUDA, Apple Silicon (MPS), and CPU
+
+All hyperparameters are overridable via environment variables, so the same file runs a small local test on a Mac and a multi-day GPU run without edits. The `run_*.sh` scripts are the documented presets:
+
+| Preset | Params | d_model / layers / heads | Context | Tokens |
+|--------|--------|--------------------------|---------|--------|
+| `run_124m.sh` | 124M | 768 / 12 / 12 | 512 | ~200M (Wikipedia-DE) |
+| `run_350m.sh` | 355M | 1024 / 24 / 16 | 1024 | ~10B |
+| `run_500m.sh` | 540M | 1280 / 24 / 20 | 2048 | ~10B (FineWeb2-DE + Wikipedia-DE + Python) |
+
+## Pipeline
 
 ```
-GPT Decoder (Decoder-only Transformer)
-├── Token Embedding (Vocab: 50257)
-├── Positional Encoding
-├── 6x Decoder Blocks
-│   ├── Masked Multi-Head Attention (8 Heads)
-│   ├── Layer Normalization
-│   ├── Feed-Forward Network (512 → 2048 → 512)
-│   └── Layer Normalization
-└── Language Model Head (512 → 50257)
+prepare_data.py   stream sources → tokenize → uint16 shards (~20 GB for 10B tokens)
+train.py          pretraining; reads shards via np.memmap, never loads all data into RAM
+export_weights.py training checkpoint → lean fp16 inference weights (drops Adam state, ~⅓ size)
+sft.py            supervised fine-tuning with loss masking (loss only on the answer tokens)
+chat_server.py    stdlib-only HTTP inference server, loads the model once
+terminal/         Ink (React for the terminal) chat UI talking to chat_server.py
+webapp/           public FastAPI demo, CPU inference, downloads weights from a GitHub release
 ```
 
-### Hyperparameters
+For the full step-by-step guide to renting a GPU on Vast.ai and running a training job, see [VASTAI.md](VASTAI.md).
 
-| Parameter | Value |
-|-----------|-------|
-| d_model | 512 |
-| num_heads | 8 |
-| d_ff | 2048 |
-| num_layers | 6 |
-| vocab_size | 50257 (GPT-2 Tokenizer) |
-| seq_length | 128 |
-| batch_size | 8 |
-| learning_rate | 3e-4 |
-
-**Total Parameters:** ~44 Million
-
-## 📋 Requirements
-
-- Python >= 3.13
-- Apple Silicon Mac (for MPS) or CPU
-
-## 🚀 Installation
-
-1. **Clone the repository:**
-```bash
-git clone <your-repo-url>
-cd transfomer-test
-```
-
-2. **Install dependencies:**
-```bash
-pip install -e .
-```
-
-Or manually:
-```bash
-pip install torch numpy tiktoken datasets wikipedia
-```
-
-## 💻 Usage
-
-### Training
-
-Training is done in the Jupyter Notebook `transformer.ipynb`:
+## Running it
 
 ```bash
-jupyter notebook transformer.ipynb
+# Install (Python ≥ 3.13, uv recommended)
+uv sync
+
+# Small local training run (MPS/CPU-friendly defaults)
+python train.py
+
+# Full preset on a CUDA machine — see VASTAI.md
+python prepare_data.py        # once, builds shards/
+bash run_500m.sh
+
+# Inference against a checkpoint
+CHECKPOINT=sft_540m_v2.pt CHAT_TEMPLATE=1 python chat_server.py
+cd terminal && npm install && npm start
 ```
 
-**Training Pipeline:**
+Model weights are not in the repo (`.gitignore` excludes `*.pt`); the web demo pulls fp16 weights from a GitHub release.
 
-1. **Load Data:** German Wikipedia articles via Hugging Face Datasets
-2. **Tokenization:** Using GPT-2 Tokenizer (tiktoken)
-3. **Model Training:** Cross-Entropy Loss with Adam Optimizer
-4. **Checkpoints:** Automatic saving every 2 epochs
+## What the model can and cannot do
 
-### Text Generation
+The 540M base model produces fluent, grammatical German and coherent continuations; after SFT it answers simple questions in a fixed template. It was trained on ~10B tokens — orders of magnitude less than comparable-size open models — so it has thin world knowledge and no real reasoning. That is expected and part of the point: the model doubles as a sandbox for compression experiments (pruning, quantization) where a fully-understood, self-trained baseline is worth more than a stronger black box.
 
-```python
-# Load checkpoint
-checkpoint = torch.load('checkpoint_epoch_3.pt')
-model.load_state_dict(checkpoint['model_state_dict'])
+## References
 
-# Generate text
-start_text = "Die Geschichte"
-start_tokens = encoding.encode(start_text)
-input_ids = torch.tensor([start_tokens], device=device)
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
+- [Language Models are Unsupervised Multitask Learners](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf) (GPT-2)
+- [Training Compute-Optimal Large Language Models](https://arxiv.org/abs/2203.15556) (Chinchilla)
+- [LLaMA: Open and Efficient Foundation Language Models](https://arxiv.org/abs/2302.13971) — RMSNorm/SwiGLU/RoPE recipe
+- [nanoGPT](https://github.com/karpathy/nanoGPT) — inspiration for the shard-based data pipeline
 
-generated_ids = model.generate(
-    input_ids, 
-    max_new_tokens=50, 
-    temperature=0.8
-)
+## License
 
-generated_text = encoding.decode(generated_ids[0].cpu().tolist())
-print(generated_text)
-```
-
-### Standalone Script
-
-```bash
-python main.py
-```
-
-## 📁 Project Structure
-
-```
-transfomer-test/
-├── transformer.ipynb      # Main notebook with training & generation
-├── main.py               # Standalone Python script
-├── pyproject.toml        # Project configuration
-├── checkpoint_epoch_3.pt # Saved model
-└── README.md            # This file
-```
-
-## 🧠 Implementation Details
-
-### Attention Mechanism
-
-```python
-Attention(Q,K,V) = softmax(QK^T / sqrt(d_k)) * V
-```
-
-- **Q (Query):** What are we looking for?
-- **K (Key):** What do we have?
-- **V (Value):** What do we return?
-
-### Causal Masking
-
-The model uses a lower-triangular mask so tokens can only attend to previous positions:
-
-```
-[[1, 0, 0, 0],
- [1, 1, 0, 0],
- [1, 1, 1, 0],
- [1, 1, 1, 1]]
-```
-
-### Positional Encoding
-
-Sinusoidal functions for position information:
-
-```python
-PE(pos, 2i)   = sin(pos / 10000^(2i/d_model))
-PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
-```
-
-## 📊 Training
-
-**Dataset:** 1000 German Wikipedia articles (~1M Tokens)
-
-**Training Progress:**
-- Epoch 1: Loss ~8.5
-- Epoch 5: Loss ~5.2
-- Epoch 10: Loss ~3.8
-
-**Hardware:** Apple M-Series with MPS Backend
-
-## 🎨 Text Generation Examples
-
-```
-Prompt: "Die Geschichte"
-Output: "Die Geschichte der deutschen Literatur beginnt im Mittelalter..."
-
-Prompt: "Im Jahr"
-Output: "Im Jahr 1945 endete der Zweite Weltkrieg in Europa..."
-
-Prompt: "Deutschland ist"
-Output: "Deutschland ist ein föderaler Staat in Mitteleuropa..."
-```
-
-## 🔧 Configuration
-
-Adjust hyperparameters in `transformer.ipynb`:
-
-```python
-SEQ_LENGTH = 128      # Sequence length
-BATCH_SIZE = 8        # Batch size
-NUM_EPOCHS = 10       # Number of epochs
-NUM_LAYERS = 6        # Transformer layers
-NUM_HEADS = 8         # Attention heads
-D_MODEL = 512         # Embedding dimension
-D_FF = 2048          # Feed-forward dimension
-```
-
-## 📚 References
-
-- [Attention is All You Need (2017)](https://arxiv.org/abs/1706.03762) - Original Transformer Paper
-- [Language Models are Unsupervised Multitask Learners](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf) - GPT-2 Paper
-- [The Illustrated Transformer](http://jalammar.github.io/illustrated-transformer/)
-
-## 🛠️ Technology Stack
-
-- **PyTorch** - Deep Learning Framework
-- **tiktoken** - GPT-2/3/4 Tokenizer
-- **Hugging Face Datasets** - Wikipedia Data
-- **NumPy** - Numerical Operations
-
-## 📝 TODO
-
-- [ ] Gradient Accumulation for larger batch sizes
-- [ ] Learning Rate Scheduling
-- [ ] Beam Search for better generation
-- [ ] Top-k/Top-p Sampling
-- [ ] Model Evaluation (Perplexity)
-- [ ] Multi-GPU Training
-- [ ] Mixed Precision Training (FP16)
-
-## 🐛 Known Issues
-
-- Training on CPU is very slow (use MPS or CUDA)
-- Large sequences (>256) require significant VRAM
-- Text generation can become repetitive (adjust temperature)
-
-## 📄 License
-
-MIT License - Free to use for learning and research purposes
-
-## 👤 Author
-
-Created as a learning project to implement Transformer architectures
-
----
-
-⭐ **Star this project** if it helped you understand Transformers!
+[MIT](LICENSE)

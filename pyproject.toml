@@ -1,7 +1,7 @@
 [project]
-name = "transfomer-test"
+name = "transformer-test"
 version = "0.1.0"
-description = "Add your description here"
+description = "GPT-style transformer trained from scratch in PyTorch — 540M-param German model, pretraining + SFT + inference"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -10,5 +10,4 @@ dependencies = [
     "plotly>=6.7.0",
     "tiktoken>=0.12.0",
     "torch>=2.12.0",
-    "wikipedia>=1.4.0",
 ]
