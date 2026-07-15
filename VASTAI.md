@@ -37,8 +37,8 @@ ssh -p <PORT> root@<HOST>
 On the instance:
 
 ```bash
-git clone <YOUR_REPO_URL> transformer-test   # or upload via scp
-cd transformer-test
+git clone https://github.com/getitdone-gmbh/ai-transformer-architecture.git   # or upload via scp
+cd ai-transformer-architecture
 bash vastai_setup.sh                          # installs tiktoken, datasets, numpy
 ```
 
@@ -46,7 +46,7 @@ No git remote? Then upload from your local machine (only the files needed):
 
 ```bash
 # from your local machine:
-scp -P <PORT> train.py run_124m.sh vastai_setup.sh root@<HOST>:~/transformer-test/
+scp -P <PORT> train.py run_124m.sh vastai_setup.sh root@<HOST>:~/ai-transformer-architecture/
 ```
 
 ## 4. Start training
@@ -96,7 +96,7 @@ checkpoint before you destroy it:**
 
 ```bash
 # from your local machine:
-scp -P <PORT> root@<HOST>:~/transformer-test/checkpoint_epoch_1.pt ./checkpoint_124m.pt
+scp -P <PORT> root@<HOST>:~/ai-transformer-architecture/checkpoint_epoch_1.pt ./checkpoint_124m.pt
 ```
 
 Then **destroy** the Vast.ai instance (don't just stop it), otherwise it

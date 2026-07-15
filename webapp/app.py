@@ -27,7 +27,7 @@ from model import GPTDecoder
 
 WEIGHTS_URL = os.environ.get(
     "WEIGHTS_URL",
-    "https://github.com/b3rtram/transformer-test/releases/download/"
+    "https://github.com/getitdone-gmbh/ai-transformer-architecture/releases/download/"
     "weights-124m/weights_124m_fp16.pt",
 )
 WEIGHTS_PATH = os.environ.get("WEIGHTS_PATH", "/tmp/model_weights.pt")
@@ -35,7 +35,7 @@ MAX_PROMPT_TOKENS = 256
 
 torch.set_num_threads(os.cpu_count() or 4)
 
-app = FastAPI(title="transformer-test demo")
+app = FastAPI(title="ai-transformer-architecture demo")
 _lock = threading.Lock()
 
 

@@ -1,4 +1,4 @@
-# transformer-test — a GPT trained from scratch
+# ai-transformer-architecture — a GPT trained from scratch
 
 A decoder-only transformer (GPT-style) implemented and trained **from scratch in PyTorch** — no HuggingFace `transformers`, no pretrained weights. The largest run is a **540M-parameter German base model trained on ~10B tokens** (FineWeb2 + Wikipedia + Python code) on a rented H100, followed by supervised fine-tuning into a German question-answering model on an Apple M4 Max.
 

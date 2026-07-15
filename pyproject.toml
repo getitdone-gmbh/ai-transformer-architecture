@@ -1,5 +1,5 @@
 [project]
-name = "transformer-test"
+name = "ai-transformer-architecture"
 version = "0.1.0"
 description = "GPT-style transformer trained from scratch in PyTorch — 540M-param German model, pretraining + SFT + inference"
 readme = "README.md"
