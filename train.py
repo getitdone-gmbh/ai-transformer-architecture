@@ -350,8 +350,12 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("cos", angles.cos(), persistent=False)
         self.register_buffer("sin", angles.sin(), persistent=False)
 
-    def forward(self, seq_len):
-        return self.cos[:seq_len], self.sin[:seq_len]
+    def forward(self, seq_len, offset=0):
+        # offset: absolute position of the first query — during cached
+        # generation the "sequence" handed to attention is just the newest
+        # token, but RoPE must rotate it by its ABSOLUTE position.
+        return (self.cos[offset:offset + seq_len],
+                self.sin[offset:offset + seq_len])
 
 
 def apply_rotary(x, cos, sin):
@@ -453,6 +457,47 @@ class MultiHeadAttention(nn.Module):
         )
         out = self.combine_heads(out)
         return self.W_o(out)
+
+    def forward_with_cache(self, x, kv_cache=None, pos_offset=0):
+        """Inference-only twin of forward() with a KV cache.
+
+        The observation that makes fast autoregressive inference possible:
+        while generating, the K and V vectors of all PREVIOUS tokens never
+        change — only the newest token contributes a new Q, K and V. So we
+        compute projections only for the new token(s), append K and V to
+        the cache, and let the new query attend over the whole cached
+        history. Cost per generated token: O(T) instead of O(T^2).
+
+        kv_cache:   (K, V) from previous calls, each [B, H, T_past, d_k];
+                    None on the first (prefill) call.
+        pos_offset: absolute position of x's first token in the sequence.
+
+        Supports exactly the two shapes generate() produces: prefill
+        (kv_cache=None, many query positions, causal mask needed) and
+        decode (one query position, which may see ALL cached keys — for a
+        single trailing query, causality needs no mask at all).
+
+        Returns (out, (K, V)) with the updated cache.
+        """
+        Q = self.split_heads(self.W_q(x))
+        K = self.split_heads(self.W_k(x))
+        V = self.split_heads(self.W_v(x))
+
+        cos, sin = self.rope(Q.size(2), offset=pos_offset)
+        Q = apply_rotary(Q, cos, sin)
+        K = apply_rotary(K, cos, sin)
+
+        if kv_cache is not None:
+            past_k, past_v = kv_cache
+            K = torch.cat([past_k, K], dim=2)
+            V = torch.cat([past_v, V], dim=2)
+
+        out = F.scaled_dot_product_attention(
+            Q, K, V,
+            is_causal=Q.size(2) > 1,   # prefill: mask; decode (T=1): none
+            dropout_p=0.0,             # cache path is inference-only
+        )
+        return self.W_o(self.combine_heads(out)), (K, V)
 
 
 class FeedForward(nn.Module):
@@ -587,6 +632,15 @@ class DecoderBlock(nn.Module):
         x = x + self.dropout(self.feed_forward(self.norm2(x)))
         return x
 
+    def forward_with_cache(self, x, kv_cache=None, pos_offset=0):
+        """Inference-only twin of forward() — no dropout, threads the
+        KV cache through the attention sublayer."""
+        attn_out, new_kv = self.attention.forward_with_cache(
+            self.norm1(x), kv_cache, pos_offset)
+        x = x + attn_out
+        x = x + self.feed_forward(self.norm2(x))
+        return x, new_kv
+
 
 def create_causal_mask(seq_len, device):
     """Lower-triangular mask: position i sees only positions <= i.
@@ -671,7 +725,7 @@ class GPTDecoder(nn.Module):
     @torch.no_grad()
     def generate(self, input_ids, max_new_tokens=50, temperature=1.0,
                  top_k=None, top_p=None, repetition_penalty=1.0,
-                 eos_token_id=None):
+                 eos_token_id=None, use_cache=True):
         """Autoregressive sampling with modern decoding strategies.
 
         temperature: scales logits before softmax. <1 sharper, >1 flatter.
@@ -685,6 +739,11 @@ class GPTDecoder(nn.Module):
                      (batch=1). A base model practically never produces it —
                      only SFT teaches the model to signal "done". That is
                      why the parameter is optional.
+        use_cache:   reuse the K/V vectors of previous tokens (KV cache)
+                     instead of re-running the full forward pass over the
+                     whole sequence for every new token. Same math, same
+                     output distribution — per-step cost drops from O(T^2)
+                     to O(T). False = the naive path, kept for comparison.
 
         Order: rep_penalty -> /temperature -> top_k -> top_p -> sample.
         """
@@ -693,9 +752,31 @@ class GPTDecoder(nn.Module):
         # disabling dropout if the caller keeps training.
         was_training = self.training
         self.eval()
-        for _ in range(max_new_tokens):
-            logits = self.forward(input_ids)
-            logits = logits[:, -1, :]  # [B, V] — logits for the next token
+        # The RoPE tables are the hard ceiling for the sequence length —
+        # beyond them there are no position angles left.
+        rope_max = self.decoder_blocks[0].attention.rope.cos.size(0)
+        caches = [None] * self.num_layers
+        for step in range(max_new_tokens):
+            if not use_cache:
+                # Naive path: full forward pass over the ENTIRE sequence,
+                # throwing away everything but the last position's logits.
+                logits = self.forward(input_ids)[:, -1, :]
+            elif step == 0:
+                # Prefill: one full pass over the prompt fills the cache.
+                x = self.dropout(self.embedding(input_ids))  # no-op in eval
+                for i, block in enumerate(self.decoder_blocks):
+                    x, caches[i] = block.forward_with_cache(x, None, 0)
+                logits = self.lm_head(self.norm_f(x[:, -1:, :]))[:, -1, :]
+            else:
+                # Decode: only the newest token runs through the model;
+                # attention reads everything older from the cache.
+                pos = input_ids.size(1) - 1
+                if pos >= rope_max:
+                    break
+                x = self.embedding(input_ids[:, -1:])
+                for i, block in enumerate(self.decoder_blocks):
+                    x, caches[i] = block.forward_with_cache(x, caches[i], pos)
+                logits = self.lm_head(self.norm_f(x))[:, -1, :]
 
             # 1. Repetition penalty: dampen the logits of tokens already seen.
             # HuggingFace convention: positive logits / penalty, negative * penalty
