@@ -33,7 +33,11 @@ CHECKPOINT = os.environ.get("CHECKPOINT", "sft_540m_v2.pt")
 PORT = int(os.environ.get("PORT", "8123"))
 
 # Sampling defaults — the UI can override every value per request.
-DEFAULTS = dict(max_new_tokens=80, temperature=0.8, top_p=0.9,
+# max_new_tokens is a BUDGET, not a target: the SFT model stops itself
+# via <|endoftext|> when the answer is done, so a generous default only
+# matters for genuinely long answers (recipes, stories). 80 was tuned
+# for the pre-KV-cache days when every token hurt.
+DEFAULTS = dict(max_new_tokens=400, temperature=0.8, top_p=0.9,
                 repetition_penalty=1.2)
 
 # Chat mode (CHAT_TEMPLATE=1): for SFT checkpoints. Wraps the input in the
