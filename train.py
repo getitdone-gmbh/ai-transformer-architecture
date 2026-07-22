@@ -89,6 +89,13 @@ CHECKPOINT_EVERY_N_EPOCHS = 1     # full epochs are long now -> save every one
 CHECKPOINT_EVERY_N_STEPS = 2000   # plus a rolling 'checkpoint_latest.pt'
 AUTO_RESUME = True                # automatically load the newest checkpoint
 RESUME_FROM = None                # overrides AUTO_RESUME when set
+# Warm start (continued pretraining): load ONLY the model weights from this
+# checkpoint — optimizer moments, step counter and LR schedule start fresh.
+# This is different from resume: resume continues an interrupted run
+# (including its cosine schedule); warm start begins a NEW run on top of
+# finished weights, typically with a much lower peak LR. A found resume
+# checkpoint takes precedence, so a crashed warm-start run resumes itself.
+INIT_FROM = _env("INIT_FROM", "", str)
 # Architecture marker in the checkpoint so old files can be detected
 ARCH_VERSION = "pre_ln_tied_swiglu_rope_init_rms_v1"
 
@@ -882,10 +889,13 @@ def load_checkpoint(filepath, model, optimizer, device):
             # model weights are loaded; only the Adam moments start fresh.
             print(f"  Optimizer state incompatible — starting with a fresh "
                   f"optimizer ({type(e).__name__}: {e})")
-    epoch = ckpt["epoch"]
+    # Exported weight files (export_weights.py) carry config + weights but
+    # no training metadata — tolerate that, a warm start needs none of it.
+    epoch = ckpt.get("epoch", 0)
     global_step = ckpt.get("global_step", 0)
-    print(f"  Checkpoint loaded: epoch {epoch}, step {global_step}, loss {ckpt['loss']:.4f}")
-    return epoch, global_step, ckpt["loss"]
+    loss = ckpt.get("loss", ckpt.get("train_loss", float("nan")))
+    print(f"  Checkpoint loaded: epoch {epoch}, step {global_step}, loss {loss:.4f}")
+    return epoch, global_step, loss
 
 
 def find_latest_checkpoint(directory):
@@ -1208,6 +1218,19 @@ def main():
 
     if resume_path and os.path.exists(resume_path):
         start_epoch, global_step, _ = load_checkpoint(resume_path, model, optimizer, device)
+    elif INIT_FROM:
+        # Warm start: weights only. checkpoint_dims_match would silently
+        # fall back to random init on a size mismatch — for an explicit
+        # warm start that must be a hard error instead.
+        if not checkpoint_dims_match(INIT_FROM):
+            raise RuntimeError(
+                f"INIT_FROM='{INIT_FROM}' does not match the current model "
+                f"dimensions ({D_MODEL}d / {NUM_LAYERS}L) — refusing to "
+                "warm-start from a different-sized model."
+            )
+        load_checkpoint(INIT_FROM, model, None, device)
+        print(f"Warm start from '{INIT_FROM}': weights loaded, "
+              "optimizer/schedule/step counter start fresh.")
     elif resume_path:
         print(f"  (No checkpoint '{resume_path}' found — starting fresh.)")
     else:

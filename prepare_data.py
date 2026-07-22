@@ -31,9 +31,16 @@ fast-forwarded via dataset.skip(n_docs) — only the download is redone,
 not the tokenization.
 """
 
+import hashlib
 import json
 import os
 import time
+
+# A stale token in the local keychain breaks even anonymous HF access
+# (401 on public repos). Everything we pull is public, so force anonymous
+# mode. Must happen BEFORE the hub libraries are imported. On a rented
+# instance (no stored token) this is a no-op.
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 
 import numpy as np
 import tiktoken
@@ -51,9 +58,18 @@ def _env(name, default, cast=str):
 FINEWEB_TOKENS = int(_env("FINEWEB_TOKENS", 7e9, float))
 WIKI_TOKENS = int(_env("WIKI_TOKENS", 2e9, float))
 CODE_TOKENS = int(_env("CODE_TOKENS", 1e9, float))
+HQ_TOKENS = int(_env("HQ_TOKENS", 0, float))  # FineWeb2-HQ German, default off
 SHARD_TOKENS = int(_env("SHARD_TOKENS", 1e8, float))
 SHARD_DIR = _env("SHARD_DIR", "shards")
 DOCS_PER_BATCH = 512   # documents per encode_ordinary_batch call
+
+# Contamination guard: md5 hashes of documents that must NEVER enter the
+# training data — the frozen bpb eval set (compare_bpb.py writes this file).
+# FineWeb2-HQ is filtered from ALL of FineWeb2, so it can contain the very
+# documents our eval set was built from; training on them would silently
+# inflate every future before/after measurement. Exact-hash matching
+# catches exactly that case (HQ keeps the text verbatim).
+EXCLUDE_HASHES = _env("EXCLUDE_HASHES", "eval_exclude_hashes.json")
 
 # Source definitions: (name, token_budget, load_dataset kwargs, text_field).
 #   - FineWeb2: quality-filtered, deduplicated web German — the modern
@@ -70,6 +86,13 @@ SOURCES = [
      dict(path="wikimedia/wikipedia", name="20231101.de", split="train"), "text"),
     ("code", CODE_TOKENS,
      dict(path="codeparrot/codeparrot-clean", split="train"), "content"),
+    #   - FineWeb2-HQ: model-based top-10% quality filter over FineWeb2
+    #     (EPFL) — the "textbook density" bet for continued pretraining.
+    #     No named config on the hub, hence the raw parquet glob.
+    ("fineweb_hq", HQ_TOKENS,
+     dict(path="parquet",
+          data_files="hf://datasets/epfml/FineWeb2-HQ/deu_Latn/*.parquet",
+          split="train"), "text"),
 ]
 
 
@@ -102,15 +125,25 @@ class ShardWriter:
         self._buffered_docs = 0
 
     def source_progress(self, source):
-        """(tokens, docs) that already lie in shards for this source."""
-        toks = sum(s["num_tokens"] for s in self.manifest["shards"]
-                   if s["source"] == source)
-        docs = sum(s["num_docs"] for s in self.manifest["shards"]
-                   if s["source"] == source)
-        return toks, docs
+        """(tokens, stream position) already covered by shards for this source.
 
-    def add(self, arr):
-        self._buffer.append(arr)
+        The second value is what a resume must feed to dataset.skip(). With
+        hash filtering it is NOT the number of docs in the shards: filtered
+        docs were consumed from the stream but never written. Each shard
+        therefore records "stream_docs" — the stream position after the last
+        document that ENDS in it. Old manifests (written before filtering
+        existed) lack the field; there stream position == docs written.
+        """
+        shards = [s for s in self.manifest["shards"] if s["source"] == source]
+        toks = sum(s["num_tokens"] for s in shards)
+        if any("stream_docs" in s for s in shards):
+            pos = max(s.get("stream_docs", 0) for s in shards)
+        else:
+            pos = sum(s["num_docs"] for s in shards)
+        return toks, pos
+
+    def add(self, arr, stream_idx):
+        self._buffer.append((arr, stream_idx))
         self._buffered += arr.size
         self._buffered_docs += 1
 
@@ -128,8 +161,9 @@ class ShardWriter:
         # (For the closing shard: everything that is there.)
         take = self._buffered if partial_ok else self.shard_tokens
         chunks, got, docs = [], 0, 0
+        last_stream_idx = None
         while self._buffer and got < take:
-            arr = self._buffer.pop(0)
+            arr, stream_idx = self._buffer.pop(0)
             if got + arr.size > take:
                 # Document exceeds the shard boundary: split it, put the
                 # rest back into the buffer. The doc counter attributes the
@@ -138,20 +172,25 @@ class ShardWriter:
                 head, tail = arr[: take - got], arr[take - got:]
                 chunks.append(head)
                 got += head.size
-                self._buffer.insert(0, tail)
+                self._buffer.insert(0, (tail, stream_idx))
             else:
                 chunks.append(arr)
                 got += arr.size
                 docs += 1
+                last_stream_idx = stream_idx
         self._buffered -= got
         self._buffered_docs -= docs
 
         idx = len(self.manifest["shards"])
         fname = f"shard_{idx:04d}_{source}.bin"
         np.concatenate(chunks).tofile(os.path.join(self.out_dir, fname))
-        self.manifest["shards"].append(
-            {"file": fname, "source": source, "num_tokens": got, "num_docs": docs}
-        )
+        entry = {"file": fname, "source": source, "num_tokens": got, "num_docs": docs}
+        if last_stream_idx is not None:
+            # Stream position after the last doc that ends here — the
+            # resume skip target (includes hash-filtered docs, see
+            # source_progress).
+            entry["stream_docs"] = last_stream_idx + 1
+        self.manifest["shards"].append(entry)
         tmp = self.manifest_path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(self.manifest, f, indent=1)
@@ -162,7 +201,7 @@ class ShardWriter:
 
 
 def build_source(writer, source, target_tokens, ds_kwargs, encoding, eot,
-                 text_key="text"):
+                 text_key="text", exclude=frozenset()):
     done_tokens, done_docs = writer.source_progress(source)
     if done_tokens >= target_tokens:
         print(f"[{source}] already finished ({done_tokens:,} tokens) — skip")
@@ -172,7 +211,7 @@ def build_source(writer, source, target_tokens, ds_kwargs, encoding, eot,
 
     ds = load_dataset(streaming=True, **ds_kwargs)
     if done_docs > 0:
-        # Resume: skip documents that already lie in shards.
+        # Resume: skip to the stream position covered by existing shards.
         # skip() fast-forwards the stream — the download runs through
         # again, but the expensive tokenization does not.
         print(f"[{source}] Resume: skipping {done_docs:,} documents")
@@ -180,25 +219,35 @@ def build_source(writer, source, target_tokens, ds_kwargs, encoding, eot,
 
     n_threads = os.cpu_count() or 4
     produced = done_tokens
+    stream_idx = done_docs   # position in the source stream, incl. filtered
+    n_filtered = 0
     t0 = time.time()
     next_log = produced + 10_000_000
-    batch = []
+    batch = []               # list of (text, stream_idx)
 
-    def process(texts):
+    def process(items):
         nonlocal produced
-        for toks in encoding.encode_ordinary_batch(texts, num_threads=n_threads):
+        texts = [t for t, _ in items]
+        encoded = encoding.encode_ordinary_batch(texts, num_threads=n_threads)
+        for toks, (_, idx) in zip(encoded, items):
             # Budget check per DOCUMENT, not per batch: a 512-article
             # batch can be millions of tokens large — without this check
             # the budget would be overshot by up to a whole batch.
             if produced >= target_tokens:
                 break
             arr = np.asarray(toks + [eot], dtype=np.uint16)
-            writer.add(arr)
+            writer.add(arr, idx)
             produced += arr.size
         writer.flush_if_full(source)
 
     for doc in ds:
-        batch.append(doc[text_key])
+        text = doc[text_key]
+        idx = stream_idx
+        stream_idx += 1
+        if exclude and hashlib.md5(text.encode("utf-8")).hexdigest() in exclude:
+            n_filtered += 1
+            continue
+        batch.append((text, idx))
         if len(batch) >= DOCS_PER_BATCH:
             process(batch)
             batch = []
@@ -219,6 +268,9 @@ def build_source(writer, source, target_tokens, ds_kwargs, encoding, eot,
               f"(target was {target_tokens:,})")
 
     writer.finish_source(source)
+    if n_filtered:
+        print(f"  [{source}] contamination filter: {n_filtered:,} eval-set "
+              f"documents excluded")
     print(f"[{source}] finished: {writer.source_progress(source)[0]:,} tokens")
 
 
@@ -230,12 +282,27 @@ def main():
     print(f"Plan: {planned:,} tokens -> ~{planned * 2 / 1024**3:.1f} GB "
           f"in '{SHARD_DIR}/' (uint16)")
 
+    exclude = frozenset()
+    if os.path.exists(EXCLUDE_HASHES):
+        with open(EXCLUDE_HASHES) as f:
+            exclude = frozenset(json.load(f)["md5"])
+        print(f"Contamination guard: {len(exclude)} eval-set hashes "
+              f"from '{EXCLUDE_HASHES}'")
+    elif HQ_TOKENS > 0:
+        # HQ overlaps the ORIGINAL FineWeb2 by construction — preparing it
+        # without the guard would poison the frozen eval set. Refuse.
+        raise RuntimeError(
+            f"HQ_TOKENS is set but '{EXCLUDE_HASHES}' is missing — "
+            "run compare_bpb.py once (it writes the hash file) or set "
+            "EXCLUDE_HASHES to its location."
+        )
+
     writer = ShardWriter(SHARD_DIR, SHARD_TOKENS)
     for source, target, ds_kwargs, text_key in SOURCES:
         if target <= 0:
             continue
         build_source(writer, source, target, ds_kwargs, encoding, eot,
-                     text_key=text_key)
+                     text_key=text_key, exclude=exclude)
 
     total = sum(s["num_tokens"] for s in writer.manifest["shards"])
     print(f"\nDone: {total:,} tokens in {len(writer.manifest['shards'])} shards.")

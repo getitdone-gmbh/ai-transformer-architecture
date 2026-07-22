@@ -46,6 +46,51 @@ check the points form a line, extrapolate.
 **Why:** The honest way to know the architecture scales — and the
 prerequisite for any credit-funded 1B+ run.
 
+## Continued pretraining on FineWeb2-HQ — what does data QUALITY buy at fixed N?
+**Question:** Does top-10%-filtered German (FineWeb2-HQ) move the model
+further than the same budget of unfiltered FineWeb2? The Phi-series bet,
+tested on our own weights.
+**Background:** The bpb comparison (compare_bpb.py) showed our 540M beats
+Qwen2.5-0.5B on German web text (0.92 vs 1.35 bits/byte) but loses where
+knowledge density decides (code: 0.69 vs 0.45). Weakness identified:
+knowledge in the weights, not language form. Web-average text is
+knowledge-thin; model-based quality filtering concentrates exactly the
+explanatory, textbook-like documents that carry the most facts per token.
+**Setup (prepared, see run_540m_hq.sh):** Warm-start the 540M checkpoint
+(INIT_FROM in train.py: weights only, fresh optimizer/schedule, peak LR
+2.5e-5 = 10% of the original — full LR on a converged model destroys
+more than it teaches). +5B tokens: 4.5B `epfml/FineWeb2-HQ` `deu_Latn`
++ 0.5B codeparrot Python read from the dataset START. The code is
+REPLAY, not a code push: continued training only preserves what the
+gradient keeps seeing — a German-only diet would slowly recruit the code
+slots for German (catastrophic forgetting); a ~10% replay fraction
+(matching the original mix) is known to prevent most of it. Re-seeing
+already-trained code files is fine for replay and guaranteed disjoint
+from the code eval set (built from the LAST codeparrot file).
+(python-edu was considered as HQ code source and rejected: it ships
+blob_ids, not text.) Cost: H100 ~18–20 h, ~$35.
+**Contamination guard:** HQ is drawn from ALL of FineWeb2, so it can
+contain the very documents the frozen bpb eval set was built from.
+compare_bpb.py writes `eval_exclude_hashes.json` (md5 of all 1,372 eval
+docs, committed); prepare_data.py drops matching docs and refuses to
+build HQ without the file. (An HQ `file_path` filter was the first idea
+— doesn't work, the column points at CommonCrawl WARCs.)
+**Measurement:** the frozen bpb eval set before/after (same measuring
+stick across experiments), plus cloze_eval.py (probability of the
+correct answer token — measures facts, not fluency).
+**Baselines (2026-07-22, weights_540m_fp32.pt):** fineweb-bpb 0.9204,
+code-bpb 0.6852 (retention alarm if it drifts above ~0.75),
+cloze answer-bpb 0.5556, cloze top-1 57%. Qwen2.5-0.5B for scale:
+1.3465 / 0.4468 / 0.8602 / 37%.
+**Control experiment (optional, doubles the cost):** +5B *unfiltered*
+FineWeb2 tokens from behind the training cutoff. Only this pair cleanly
+separates "more tokens" from "better tokens" — without it, a gain could
+be either lever.
+**Outcomes:** HQ clearly ahead of control → quality filtering is the
+cheapest capability lever at this scale (the Phi thesis holds at 540M).
+No difference → at 10–15B total tokens the model is still so data-hungry
+that any tokens help equally; quality starts mattering later.
+
 ## Tool-calling SFT: own 540M vs. Qwen2.5-0.5B
 **Question:** What are trillions of pretraining tokens worth, measured on
 one concrete task?
