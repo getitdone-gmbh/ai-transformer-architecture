@@ -43,5 +43,8 @@ embedding_animation.html
 # Token-Shards (prepare_data.py Output, viele GB)
 shards/
 
+# Frozen bpb eval set (compare_bpb.py, third-party text)
+eval_data/
+
 # Node
 terminal/node_modules/
