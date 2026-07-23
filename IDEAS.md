@@ -133,3 +133,21 @@ push factual accuracy of the 540M?
 **Setup:** Wikipedia-DE snippets, embedding model as librarian, plug into
 `chat_server.py /generate`. The "facts lever" — SFT v3 with
 context-grounded examples would strengthen it further.
+
+## Vision bolt-on (LLaVA recipe) — parked, documented for completeness
+**Question:** Can the 540M describe images, given that the decoder never
+sees "text" anyway — only d_model vectors after the embedding layer?
+**The idea:** A frozen pretrained vision encoder (SigLIP/CLIP ViT) turns
+an image into ~576 patch vectors; a small trainable projector (2-layer
+MLP, a few M params) maps them into OUR embedding space; the image
+becomes a prefix of pseudo-tokens in the ordinary autoregressive
+sequence. Only the projector (plus optionally a light finetune) trains —
+the language model's residual stream already carries the concepts, the
+projector just has to deliver image information to the right places.
+Same philosophy as RAG: inject into context instead of pressing into
+weights.
+**Why parked:** Needs a new data pipeline (German image-caption pairs),
+a new eval question, and the payoff at 540M is a demo rather than a
+measurement. Bigger project than one lever. Documented so the mechanism
+is on record: multimodality is an embedding-space question, not an
+architecture question.
