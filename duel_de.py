@@ -53,6 +53,22 @@ QUESTIONS = [
     "Warum ist der Himmel blau?",
 ]
 
+# Qwen's home game: 18T tokens included serious amounts of code —
+# our 1B Python tokens are a rounding error against that.
+PYTHON_PROMPTS = [
+    "def bubble_sort(arr):\n",
+    "def is_even(n):\n    ",
+    "# Gibt die Summe aller Zahlen in der Liste zurueck\ndef summe(liste):\n",
+    'import os\n\nfor filename in os.listdir("."):\n    ',
+]
+
+# Our guaranteed away loss: the 540M has seen almost no English.
+ENGLISH_PROMPTS = [
+    "The capital of France is",
+    "Once upon a time, there was a",
+    "Water boils at a temperature of",
+]
+
 # CRITICAL: baked into the SFT weights — do not translate or alter.
 PROMPT_TMPL = "### Frage:\n{frage}\n\n### Antwort:\n"
 
@@ -118,6 +134,14 @@ def gen_qwen(model, tok, input_ids):
                       skip_special_tokens=True).strip()
 
 
+def block(label, text):
+    """Multi-line safe: code prompts/answers keep their line breaks."""
+    lines = text.split("\n")
+    say(f"{label}{lines[0]}")
+    for line in lines[1:]:
+        say(f"             {line}")
+
+
 def show(title, prompts, ours_answers, qwen_answers):
     say("")
     say("=" * 72)
@@ -126,32 +150,51 @@ def show(title, prompts, ours_answers, qwen_answers):
     pause(2)
     for p, o, q in zip(prompts, ours_answers, qwen_answers):
         say("")
-        say(f"» {p}")
+        block("» ", p)
         pause(0.8)
-        say(f"  UNSER 540M : {o}")
+        block("  UNSER 540M: ", o)
         pause(0.8)
-        say(f"  QWEN 0.5B  : {q}")
+        block("  QWEN 0.5B : ", q)
         say("-" * 72)
         pause(2.5)
 
 
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
-if SECTION in ("all", "complete"):
+# All base-vs-base sections share one model load per side.
+BASE_SECTIONS = [
+    ("complete",
+     "TEIL 1 — SATZ VERVOLLSTÄNDIGEN, DEUTSCH (Basis gegen Basis)",
+     COMPLETION_PROMPTS),
+    ("python",
+     "TEIL 2 — PYTHON (Basis gegen Basis — Heimspiel für Qwen)",
+     PYTHON_PROMPTS),
+    ("english",
+     "TEIL 3 — ENGLISCH (Basis gegen Basis — Auswärtsspiel für uns)",
+     ENGLISH_PROMPTS),
+]
+wanted = [s for s in BASE_SECTIONS if SECTION in ("all", s[0])]
+
+if wanted:
     ours = load_ours("weights_540m_fp32.pt")
-    a_ours = [gen_ours(ours, p, stop_at_eot=False) for p in COMPLETION_PROMPTS]
+    ours_res = {key: [gen_ours(ours, p, stop_at_eot=False) for p in prompts]
+                for key, _, prompts in wanted}
     free(ours)
 
     tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     qwen = AutoModelForCausalLM.from_pretrained(
         "Qwen/Qwen2.5-0.5B", dtype=torch.float32).to(device).eval()
-    a_qwen = []
-    for p in COMPLETION_PROMPTS:
-        ids = tok(p, return_tensors="pt").input_ids.to(device)
-        a_qwen.append(gen_qwen(qwen, tok, ids))
+    qwen_res = {}
+    for key, _, prompts in wanted:
+        outs = []
+        for p in prompts:
+            ids = tok(p, return_tensors="pt").input_ids.to(device)
+            outs.append(gen_qwen(qwen, tok, ids))
+        qwen_res[key] = outs
     free(qwen)
-    show("TEIL 1 — SATZ VERVOLLSTÄNDIGEN (Basismodell gegen Basismodell)",
-         COMPLETION_PROMPTS, a_ours, a_qwen)
+
+    for key, title, prompts in wanted:
+        show(title, prompts, ours_res[key], qwen_res[key])
 
 if SECTION in ("all", "chat"):
     sft = load_ours("sft_540m_v2.pt")
@@ -170,7 +213,7 @@ if SECTION in ("all", "chat"):
             return_tensors="pt")
         b_qwen.append(gen_qwen(qwen, tok, templated["input_ids"].to(device)))
     free(qwen)
-    show("TEIL 2 — FRAGEN BEANTWORTEN (Chat-Modell gegen Chat-Modell)",
+    show("TEIL 4 — FRAGEN BEANTWORTEN (Chat-Modell gegen Chat-Modell)",
          QUESTIONS, b_ours, b_qwen)
 
 say("")
