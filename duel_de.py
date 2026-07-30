@@ -37,10 +37,13 @@ MAX_NEW = int(os.environ.get("MAX_NEW", "60"))
 # in the prompt — "Wer zuerst kommt," + penalty turns the correct
 # continuation "mahlt zuerst" into "mahlt zu." (measured, not theory).
 
+# SKIP_HQ=1 hides the HQ column — video 1 tells the story of run 1
+# (540M vs Qwen); the HQ model is the star of video 2.
 BASE_MODELS = [
-    ("540M ALT", "weights_540m_fp32.pt"),
-    ("540M HQ ", "weights_540m_hq_fp32.pt"),
+    ("540M    ", "weights_540m_fp32.pt"),
 ]
+if os.environ.get("SKIP_HQ", "0") not in ("1", "true"):
+    BASE_MODELS.append(("540M HQ ", "weights_540m_hq_fp32.pt"))
 
 COMPLETION_PROMPTS = [
     "Das größte Landtier der Erde ist der",
