@@ -1,18 +1,22 @@
-"""German duel: our 540M vs Qwen2.5-0.5B — side-by-side, reproducible.
+"""German duel: 540M (base) vs 540M-HQ (continued pretraining) vs Qwen2.5-0.5B.
 
-Two fair pairings:
-  A) Completion (base vs base):   weights_540m_fp32.pt  vs Qwen2.5-0.5B
-  B) Questions (chat vs chat):    sft_540m_v2.pt        vs Qwen2.5-0.5B-Instruct
-     (each model gets ITS OWN chat template — ours the trained
-      "### Frage:/### Antwort:" markers, Qwen its chat_template)
+Three-way on the base sections — the HQ column shows what +5B
+quality-filtered tokens bought (facts!). Fair pairings:
 
-Decoding is greedy (deterministic) with repetition_penalty 1.2 for both —
-anyone can rerun this and get the same output. That is the point.
+  A) Completions/facts/python/english (base vs base vs base):
+     weights_540m_fp32.pt | weights_540m_hq_fp32.pt | Qwen2.5-0.5B
+  B) Questions (chat vs chat, two-way):
+     sft_540m_v2.pt vs Qwen2.5-0.5B-Instruct — the HQ base has no SFT
+     yet (that is the upcoming tool-calling chapter), so it sits out.
+
+Decoding is pure greedy for everyone — deterministic, anyone can rerun
+this and get byte-identical output. That is the point.
 
 Usage:
-    python duel_de.py                # run everything, plain output
-    VIDEO=1 python duel_de.py        # typewriter effect + pauses (screen recording)
-    SECTION=chat python duel_de.py   # only questions (or: complete)
+    python duel_de.py                 # everything, plain output
+    VIDEO=1 python duel_de.py         # typewriter + pauses (screen recording)
+    SECTION=fakten python duel_de.py  # one section only
+    (sections: complete, fakten, python, english, chat)
 """
 
 import os
@@ -32,7 +36,11 @@ MAX_NEW = int(os.environ.get("MAX_NEW", "60"))
 # Pure greedy, NO repetition penalty: it would penalize tokens that appear
 # in the prompt — "Wer zuerst kommt," + penalty turns the correct
 # continuation "mahlt zuerst" into "mahlt zu." (measured, not theory).
-REP_PENALTY = 1.0
+
+BASE_MODELS = [
+    ("540M ALT", "weights_540m_fp32.pt"),
+    ("540M HQ ", "weights_540m_hq_fp32.pt"),
+]
 
 COMPLETION_PROMPTS = [
     "Das größte Landtier der Erde ist der",
@@ -41,6 +49,20 @@ COMPLETION_PROMPTS = [
     "Ein Sprichwort sagt: Wer zuerst kommt,",
     "Sehr geehrte Damen und Herren,",
     "Rezept für Apfelkuchen: Zuerst",
+]
+
+# Factual completions. NOT hand-picked hopes: these are the measured
+# flip cases from cloze_de.jsonl — the 5 items the HQ training turned
+# from wrong to right, plus the 1 item it LOST (Mauerfall: the HQ model
+# now guesses 1961, the year the wall was BUILT — a smarter mistake,
+# but a mistake; it stays in for honesty).
+FAKTEN_PROMPTS = [
+    "Die Hauptstadt der Schweiz heißt",
+    "Berlin ist die Hauptstadt von",
+    "Der rote Planet in unserem Sonnensystem ist der",
+    "Pflanzen erzeugen ihre Energie durch",
+    "In Deutschland bezahlt man mit dem",
+    "Die Berliner Mauer fiel im Jahr",
 ]
 
 QUESTIONS = [
@@ -54,7 +76,7 @@ QUESTIONS = [
 ]
 
 # Qwen's home game: 18T tokens included serious amounts of code —
-# our 1B Python tokens are a rounding error against that.
+# our 1B (+0.5B replay) Python tokens are a rounding error against that.
 PYTHON_PROMPTS = [
     "def bubble_sort(arr):\n",
     "def is_even(n):\n    ",
@@ -62,7 +84,7 @@ PYTHON_PROMPTS = [
     'import os\n\nfor filename in os.listdir("."):\n    ',
 ]
 
-# Our guaranteed away loss: the 540M has seen almost no English.
+# Our guaranteed away loss: both 540M variants saw almost no English.
 ENGLISH_PROMPTS = [
     "The capital of France is",
     "Once upon a time, there was a",
@@ -118,7 +140,6 @@ def gen_ours(model, text, stop_at_eot):
     ids = torch.tensor([enc.encode(text)], device=device)
     out = model.generate(
         ids, max_new_tokens=MAX_NEW, temperature=1.0, top_k=1,
-        repetition_penalty=REP_PENALTY,
         eos_token_id=enc.eot_token if stop_at_eot else None,
     )
     txt = enc.decode(out[0].tolist())[len(text):]
@@ -129,7 +150,7 @@ def gen_qwen(model, tok, input_ids):
     with torch.no_grad():
         out = model.generate(
             input_ids, max_new_tokens=MAX_NEW, do_sample=False,
-            repetition_penalty=REP_PENALTY, pad_token_id=tok.eos_token_id)
+            pad_token_id=tok.eos_token_id)
     return tok.decode(out[0][input_ids.shape[1]:],
                       skip_special_tokens=True).strip()
 
@@ -138,63 +159,71 @@ def block(label, text):
     """Multi-line safe: code prompts/answers keep their line breaks."""
     lines = text.split("\n")
     say(f"{label}{lines[0]}")
+    pad = " " * len(label)
     for line in lines[1:]:
-        say(f"             {line}")
+        say(f"{pad}{line}")
 
 
-def show(title, prompts, ours_answers, qwen_answers):
+def show(title, prompts, rows):
+    """rows: list of (label, answers) — one row per model."""
     say("")
     say("=" * 72)
     say(f"  {title}")
     say("=" * 72)
     pause(2)
-    for p, o, q in zip(prompts, ours_answers, qwen_answers):
+    for i, p in enumerate(prompts):
         say("")
         block("» ", p)
         pause(0.8)
-        block("  UNSER 540M: ", o)
-        pause(0.8)
-        block("  QWEN 0.5B : ", q)
+        for label, answers in rows:
+            block(f"  {label}: ", answers[i])
+            pause(0.8)
         say("-" * 72)
         pause(2.5)
 
 
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
-# All base-vs-base sections share one model load per side.
 BASE_SECTIONS = [
     ("complete",
-     "TEIL 1 — SATZ VERVOLLSTÄNDIGEN, DEUTSCH (Basis gegen Basis)",
+     "TEIL 1 — SATZ VERVOLLSTÄNDIGEN, DEUTSCH",
      COMPLETION_PROMPTS),
+    ("fakten",
+     "TEIL 2 — FAKTEN (hier arbeiten die 5 Mrd. HQ-Tokens)",
+     FAKTEN_PROMPTS),
     ("python",
-     "TEIL 2 — PYTHON (Basis gegen Basis — Heimspiel für Qwen)",
+     "TEIL 3 — PYTHON (Heimspiel für Qwen)",
      PYTHON_PROMPTS),
     ("english",
-     "TEIL 3 — ENGLISCH (Basis gegen Basis — Auswärtsspiel für uns)",
+     "TEIL 4 — ENGLISCH (Auswärtsspiel für beide 540M)",
      ENGLISH_PROMPTS),
 ]
 wanted = [s for s in BASE_SECTIONS if SECTION in ("all", s[0])]
 
 if wanted:
-    ours = load_ours("weights_540m_fp32.pt")
-    ours_res = {key: [gen_ours(ours, p, stop_at_eot=False) for p in prompts]
-                for key, _, prompts in wanted}
-    free(ours)
+    results = {}   # results[model_label][section_key] = [answers]
+    for label, path in BASE_MODELS:
+        model = load_ours(path)
+        results[label] = {key: [gen_ours(model, p, stop_at_eot=False)
+                                for p in prompts]
+                          for key, _, prompts in wanted}
+        free(model)
 
     tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     qwen = AutoModelForCausalLM.from_pretrained(
         "Qwen/Qwen2.5-0.5B", dtype=torch.float32).to(device).eval()
-    qwen_res = {}
+    results["QWEN 0.5B"] = {}
     for key, _, prompts in wanted:
-        outs = []
-        for p in prompts:
-            ids = tok(p, return_tensors="pt").input_ids.to(device)
-            outs.append(gen_qwen(qwen, tok, ids))
-        qwen_res[key] = outs
+        results["QWEN 0.5B"][key] = [
+            gen_qwen(qwen, tok, tok(p, return_tensors="pt").input_ids.to(device))
+            for p in prompts]
     free(qwen)
 
+    labels = [lbl for lbl, _ in BASE_MODELS] + ["QWEN 0.5B"]
+    width = max(len(l) for l in labels)
     for key, title, prompts in wanted:
-        show(title, prompts, ours_res[key], qwen_res[key])
+        rows = [(lbl.ljust(width), results[lbl][key]) for lbl in labels]
+        show(title, prompts, rows)
 
 if SECTION in ("all", "chat"):
     sft = load_ours("sft_540m_v2.pt")
@@ -207,15 +236,16 @@ if SECTION in ("all", "chat"):
         "Qwen/Qwen2.5-0.5B-Instruct", dtype=torch.float32).to(device).eval()
     b_qwen = []
     for q in QUESTIONS:
-        msgs = [{"role": "user", "content": q}]
         templated = tok.apply_chat_template(
-            msgs, add_generation_prompt=True, return_dict=True,
-            return_tensors="pt")
+            [{"role": "user", "content": q}], add_generation_prompt=True,
+            return_dict=True, return_tensors="pt")
         b_qwen.append(gen_qwen(qwen, tok, templated["input_ids"].to(device)))
     free(qwen)
-    show("TEIL 4 — FRAGEN BEANTWORTEN (Chat-Modell gegen Chat-Modell)",
-         QUESTIONS, b_ours, b_qwen)
+    show("TEIL 5 — FRAGEN (Chat: 540M-SFT vs Qwen-Instruct — "
+         "HQ-SFT folgt im Tool-Calling-Kapitel)",
+         QUESTIONS,
+         [("540M SFT ", b_ours), ("QWEN INST", b_qwen)])
 
 say("")
-say("Beide Seiten: pures greedy decoding — deterministisch,")
+say("Alle Modelle: pures greedy decoding — deterministisch,")
 say("reproduzierbar mit: python duel_de.py")
