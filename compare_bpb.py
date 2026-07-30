@@ -101,6 +101,14 @@ EVAL_SOURCES = [
     ("code", int(_env("CODE_EVAL_BYTES", 0.5e6, float)),
      "datasets/codeparrot/codeparrot-clean/*.json.gz",
      "json", "content"),
+    # Third axis, added after the HQ continued-pretraining run: quality-
+    # filtered German. The original fineweb axis measures WEB-AVERAGE
+    # German — a model trained toward clean text can get worse there
+    # while getting better at German itself. This strip disambiguates.
+    # (Last of 570 HQ files; training consumed the first ~20.)
+    ("fineweb_hq", int(_env("HQ_EVAL_BYTES", 1.5e6, float)),
+     "datasets/epfml/FineWeb2-HQ/deu_Latn/*.parquet",
+     "parquet", "text"),
 ]
 
 # Per-document size limits: drop trivially short docs (boilerplate) and
@@ -116,22 +124,34 @@ MAX_DOC_BYTES = 50_000
 # ---------------------------------------------------------------------------
 
 def build_eval_set():
-    """Fill EVAL_DIR with one .jsonl per source + a provenance manifest."""
+    """Fill EVAL_DIR with one .jsonl per source + a provenance manifest.
+
+    Per-source freezing: existing .jsonl files are NEVER touched (they are
+    the frozen measuring sticks); only sources whose file is missing get
+    built. That way new axes can be added later without invalidating any
+    number ever measured on the old ones.
+    """
     manifest_path = os.path.join(EVAL_DIR, "manifest.json")
     if os.path.exists(manifest_path):
         with open(manifest_path) as f:
             manifest = json.load(f)
+    else:
+        os.makedirs(EVAL_DIR, exist_ok=True)
+        manifest = {"seq_len_note": "eval set is model-independent",
+                    "sources": []}
+
+    missing = [s for s in EVAL_SOURCES
+               if not os.path.exists(os.path.join(EVAL_DIR, f"{s[0]}.jsonl"))]
+    if not missing:
         print(f"Eval set exists ({EVAL_DIR}/) — reusing frozen set.")
         return manifest
 
     from datasets import load_dataset
     from huggingface_hub import HfFileSystem
 
-    os.makedirs(EVAL_DIR, exist_ok=True)
     fs = HfFileSystem(token=False)
-    manifest = {"seq_len_note": "eval set is model-independent", "sources": []}
 
-    for source, budget, pattern, fmt, text_key in EVAL_SOURCES:
+    for source, budget, pattern, fmt, text_key in missing:
         files = sorted(fs.glob(pattern))
         if not files:
             raise RuntimeError(f"[{source}] no files match {pattern}")
@@ -345,13 +365,15 @@ def main():
         all_results[name] = score_model(
             name, encode, eot, logits_fn, device, sources_docs)
 
+    src_names = [s for s, *_ in EVAL_SOURCES]
     print("\n" + "=" * 64)
-    print(f"{'model':<40} {'fineweb':>7} {'code':>7} {'total':>7}  (bits/byte)")
+    print(f"{'model':<40} " +
+          " ".join(f"{n[:10]:>10}" for n in src_names) +
+          f" {'total':>7}  (bits/byte)")
     for name, res in all_results.items():
-        print(f"{name:<40} "
-              f"{res['fineweb']['bpb']:>7.4f} "
-              f"{res['code']['bpb']:>7.4f} "
-              f"{res['combined']['bpb']:>7.4f}")
+        print(f"{name:<40} " +
+              " ".join(f"{res[n]['bpb']:>10.4f}" for n in src_names) +
+              f" {res['combined']['bpb']:>7.4f}")
     print("=" * 64)
     print("Lower = better compression of unseen text. This is the "
           "tokenizer-independent height line on the scaling map.")

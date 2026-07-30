@@ -91,6 +91,20 @@ cheapest capability lever at this scale (the Phi thesis holds at 540M).
 No difference → at 10–15B total tokens the model is still so data-hungry
 that any tokens help equally; quality starts mattering later.
 
+**RESULT (2026-07-30, weights_540m_hq_fp32.pt, 74k/74.8k steps):**
+Quality bought KNOWLEDGE, not language breadth. Cloze answer-bpb
+0.5556 -> 0.4568 (−18%), top-1 57% -> 63%. Code retained (0.6785,
+replay worked). Clean-German bpb 0.9048 -> 0.8945 (−1%, on the
+fineweb_hq axis added post-hoc). Web-average bpb 0.9204 -> 0.9923
+(+8% — the model shifted away from boilerplate/forum text it no longer
+sees). Meta-lesson: the original "German axis" measured web-average
+mimicry, not language quality — a third measuring strip resolved the
+apparent contradiction. Ops-lesson (expensive): interruptible GPUs are
+wrong for want-it-tomorrow runs — 3 days wall time, 2 migrations, ~2x
+cost overhead vs. on-demand; use on-demand for all future runs.
+Control run (+5B unfiltered) still open — would separate "more tokens"
+from "better tokens" for the cloze gain.
+
 ## Tool-calling SFT: own 540M vs. Qwen2.5-0.5B
 **Question:** What are trillions of pretraining tokens worth, measured on
 one concrete task?
