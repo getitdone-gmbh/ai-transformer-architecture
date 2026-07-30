@@ -54,12 +54,19 @@ COMPLETION_PROMPTS = [
     "Rezept für Apfelkuchen: Zuerst",
 ]
 
-# Factual completions. NOT hand-picked hopes: these are the measured
-# flip cases from cloze_de.jsonl — the 5 items the HQ training turned
-# from wrong to right, plus the 1 item it LOST (Mauerfall: the HQ model
-# now guesses 1961, the year the wall was BUILT — a smarter mistake,
-# but a mistake; it stays in for honesty).
-FAKTEN_PROMPTS = [
+# Factual completions — two curated sets, both MEASURED on cloze_de.jsonl,
+# selected for different stories:
+#
+# Three-way (video 2): the flip cases — the 5 items the HQ training turned
+# from wrong to right, plus the 1 it LOST (Mauerfall: the HQ model now
+# guesses 1961, the year the wall was BUILT — a smarter mistake, but a
+# mistake; stays in for honesty).
+#
+# Two-way / SKIP_HQ (video 1): a REPRESENTATIVE sample instead — 3 measured
+# hits + 3 measured misses of the old model (mirroring its true 57%).
+# Using the flip set here would be selection bias: those items are wrong-
+# by-construction for the old model and make it look artificially weak.
+FAKTEN_FLIPS = [
     "Die Hauptstadt der Schweiz heißt",
     "Berlin ist die Hauptstadt von",
     "Der rote Planet in unserem Sonnensystem ist der",
@@ -67,6 +74,17 @@ FAKTEN_PROMPTS = [
     "In Deutschland bezahlt man mit dem",
     "Die Berliner Mauer fiel im Jahr",
 ]
+FAKTEN_REPRESENTATIVE = [
+    "Der erste Bundeskanzler der Bundesrepublik Deutschland war Konrad",
+    "Die Zauberflöte komponierte Wolfgang Amadeus",
+    "Die Mona Lisa malte Leonardo da",
+    "Paris liegt an der",
+    "Das chemische Symbol für Gold ist",
+    "Zehn mal zehn ist",
+]
+FAKTEN_PROMPTS = (FAKTEN_REPRESENTATIVE
+                  if os.environ.get("SKIP_HQ", "0") in ("1", "true")
+                  else FAKTEN_FLIPS)
 
 QUESTIONS = [
     "Was ist die Hauptstadt von Frankreich?",
