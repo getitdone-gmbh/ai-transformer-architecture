@@ -192,7 +192,9 @@ BASE_SECTIONS = [
      "TEIL 1 — SATZ VERVOLLSTÄNDIGEN, DEUTSCH",
      COMPLETION_PROMPTS),
     ("fakten",
-     "TEIL 2 — FAKTEN (hier arbeiten die 5 Mrd. HQ-Tokens)",
+     ("TEIL 2 — FAKTEN (hier arbeiten die 5 Mrd. HQ-Tokens)"
+      if len(BASE_MODELS) > 1 else
+      "TEIL 2 — FAKTEN (die Grenze von 540M Parametern)"),
      FAKTEN_PROMPTS),
     ("python",
      "TEIL 3 — PYTHON (Heimspiel für Qwen)",
