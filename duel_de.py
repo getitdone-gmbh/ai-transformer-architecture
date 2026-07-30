@@ -118,14 +118,39 @@ PROMPT_TMPL = "### Frage:\n{frage}\n\n### Antwort:\n"
 device = train.get_device()
 enc = tiktoken.get_encoding("gpt2")
 
+# ANSI colors (disable with NO_COLOR=1). Fixed color per model so the
+# viewer can follow a column across the whole video.
+PLAIN = os.environ.get("NO_COLOR", "0") in ("1", "true")
+
+
+def _c(code):
+    return "" if PLAIN else f"\033[{code}m"
+
+
+RESET, BOLD, DIM = _c(0), _c(1), _c(2)
+CYAN, YELLOW = _c(96), _c(93)
+MODEL_COLORS = {"540M": _c(92), "540M HQ": _c(95), "QWEN 0.5B": _c(94),
+                "540M SFT": _c(92), "QWEN INST": _c(94)}
+
 
 def say(text, end="\n"):
-    """Typewriter print in VIDEO mode, plain print otherwise."""
+    """Typewriter print in VIDEO mode, plain print otherwise.
+
+    ANSI escape sequences are emitted instantly (not "typed") so colors
+    switch cleanly instead of flickering through half-written codes.
+    """
     if VIDEO:
-        for ch in text:
-            sys.stdout.write(ch)
+        i = 0
+        while i < len(text):
+            if text[i] == "\033":
+                j = text.index("m", i) + 1
+                sys.stdout.write(text[i:j])
+                i = j
+                continue
+            sys.stdout.write(text[i])
             sys.stdout.flush()
             time.sleep(0.012)
+            i += 1
         sys.stdout.write(end)
         sys.stdout.flush()
     else:
@@ -176,30 +201,32 @@ def gen_qwen(model, tok, input_ids):
                       skip_special_tokens=True).strip()
 
 
-def block(label, text):
+def block(label, text, color="", text_color=""):
     """Multi-line safe: code prompts/answers keep their line breaks."""
     lines = text.split("\n")
-    say(f"{label}{lines[0]}")
+    say(f"{color}{label}{RESET}{text_color}{lines[0]}{RESET}")
     pad = " " * len(label)
     for line in lines[1:]:
-        say(f"{pad}{line}")
+        say(f"{pad}{text_color}{line}{RESET}")
 
 
 def show(title, prompts, rows):
     """rows: list of (label, answers) — one row per model."""
     say("")
-    say("=" * 72)
-    say(f"  {title}")
-    say("=" * 72)
+    say(f"{CYAN}{'=' * 72}{RESET}")
+    say(f"{CYAN}{BOLD}  {title}{RESET}")
+    say(f"{CYAN}{'=' * 72}{RESET}")
     pause(2)
     for i, p in enumerate(prompts):
         say("")
-        block("» ", p)
+        block("» ", p, color=f"{BOLD}{YELLOW}",
+              text_color=f"{BOLD}{YELLOW}")
         pause(0.8)
         for label, answers in rows:
-            block(f"  {label}: ", answers[i])
+            col = MODEL_COLORS.get(label.strip(), "")
+            block(f"  {label}: ", answers[i], color=f"{BOLD}{col}")
             pause(0.8)
-        say("-" * 72)
+        say(f"{DIM}{'-' * 72}{RESET}")
         pause(2.5)
 
 
