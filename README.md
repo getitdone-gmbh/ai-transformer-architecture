@@ -13,6 +13,7 @@ This is a learning project: the code is deliberately explicit, and the comments 
 | 3. Scaling up | `model/prepare_data.py` + `runs/run_350m.sh` / `run_500m.sh` | Streaming data pipeline (10B tokens as uint16 shards), 540M main run on an H100 (~1.5 days, ~$70) |
 | 4. Fine-tuning | `model/sft.py` + `runs/run_sft.sh` | SFT on German instruction data with loss masking — turns the text continuator into an answer generator |
 | 5. Serving | `serve/` — chat server, Ink terminal UI, web demo | Local inference server + Ink terminal UI, plus a public CPU demo (FastAPI) |
+| 6. Looking inside | `explain/` — duel, tokenizer, embeddings, attention | Measuring the finished model instead of describing it — tokenizer, embeddings, attention heads, and a head-to-head against Qwen |
 
 ## Architecture
 
@@ -65,6 +66,27 @@ serve/webapp/           public FastAPI demo, CPU inference, downloads weights fr
 
 For the full step-by-step guide to renting a GPU on Vast.ai and running a training job, see [VASTAI.md](VASTAI.md).
 
+## Looking inside the model
+
+Standalone scripts that measure the finished model rather than explain it in prose. Each one prints its evidence to the terminal and states what it *cannot* show; several of them killed a plausible-sounding hypothesis, and say so. Output and comments are German, because the model is.
+
+| Script | Question it answers |
+|--------|--------------------|
+| `explain/duel_de.py` | How does our 540M hold up against 540M-HQ (+5B tokens of continued pretraining) and Qwen2.5-0.5B? Measured fact flips, not vibes |
+| `explain/tokenize_de.py` | What does the GPT-2 BPE do to German words? (~2.6 chars/token vs 5.7 on English — the same training budget buys half the text) |
+| `explain/train_tokenizer.py` | What would a German BPE look like instead? Same algorithm, same vocab size (50,257), trained on German — writes `de_bpe.json` |
+| `explain/neighbors_de.py` | What has the model learned about a word? Nearest neighbours in the embedding matrix — and how many everyday German words have no vector of their own |
+| `explain/attention_de.py` | What do the 24 × 20 = 480 attention heads actually do? Includes `SCAN=1` to rank all heads yourself, and a control run that disproved our first hypothesis |
+
+```bash
+python explain/tokenize_de.py           # no checkpoint needed
+python explain/duel_de.py               # needs weights_540m_fp32.pt + weights_540m_hq_fp32.pt
+SCAN=1 python explain/attention_de.py   # needs weights_540m_hq_fp32.pt
+```
+
+Checkpoints are looked up in `checkpoints/` by bare name, so `CHECKPOINT=sft_540m_v2.pt` finds `checkpoints/sft_540m_v2.pt`; a path with a slash (`CHECKPOINT=/mnt/big/run.pt`) is used as given.
+
+`data/de_bpe.json` (the German tokenizer from `explain/train_tokenizer.py`) is checked in, so `tokenize_de.py` runs without retraining it.
 
 ## Running it
 

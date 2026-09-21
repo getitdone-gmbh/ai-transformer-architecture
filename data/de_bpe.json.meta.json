@@ -1,0 +1,6 @@
+{
+  "trained_on": "eval_data/fineweb.jsonl, 3.4 MB",
+  "vocab_size": 50257,
+  "heldout_chars_per_token": 4.584,
+  "gpt2_chars_per_token": 2.628
+}
