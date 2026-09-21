@@ -6,8 +6,8 @@ in memory — the terminal UI can restart as often as it likes and only talks
 to it over HTTP. Deliberately Python stdlib only (http.server), no new deps.
 
 Start:
-    CHAT_TEMPLATE=1 python chat_server.py          # uses sft_540m_v2.pt
-    CHECKPOINT=other_file.pt python chat_server.py
+    CHAT_TEMPLATE=1 python serve/chat_server.py          # uses sft_540m_v2.pt
+    CHECKPOINT=other_file.pt python serve/chat_server.py
 
 Endpoints:
     GET  /info      -> model metadata (parameters, device, config)
@@ -21,15 +21,21 @@ the 540M one.
 
 import json
 import os
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import tiktoken
 import torch
 
-import train
+# model/ on sys.path — the repo layout lives in model/paths.py, and
+# anchoring to __file__ is what lets this script run from any directory.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"))
+import train  # noqa: E402
+from paths import ckpt_path  # noqa: E402
 
-CHECKPOINT = os.environ.get("CHECKPOINT", "sft_540m_v2.pt")
+CHECKPOINT = ckpt_path(os.environ.get("CHECKPOINT", "sft_540m_v2.pt"))
 PORT = int(os.environ.get("PORT", "8123"))
 
 # Sampling defaults — the UI can override every value per request.

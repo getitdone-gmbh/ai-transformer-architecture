@@ -7,9 +7,13 @@
 # same.
 set -euo pipefail
 
+# Run from anywhere: everything below is relative to the repo, not the cwd.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mkdir -p "$ROOT/logs"
+
 D_MODEL=768 NUM_HEADS=12 NUM_LAYERS=12 D_FF=2048 \
 SEQ_LENGTH=512 \
 BATCH_SIZE=16 GRAD_ACCUM_STEPS=3 \
 NUM_ARTICLES=400000 NUM_EPOCHS=1 \
 LEARNING_RATE=6e-4 \
-python train.py 2>&1 | tee train_124m.log
+python "$ROOT/model/train.py" 2>&1 | tee "$ROOT/logs/train_124m.log"

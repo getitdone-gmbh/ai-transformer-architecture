@@ -12,4 +12,4 @@ echo "== Installing missing deps =="
 pip install --no-cache-dir tiktoken datasets numpy
 
 echo "== Done. Start training with: =="
-echo "  bash run_124m.sh"
+echo "  bash runs/run_124m.sh"

@@ -39,6 +39,10 @@
 # baseline numbers in IDEAS.md — same frozen eval set, honest before/after.
 set -euo pipefail
 
+# Run from anywhere: everything below is relative to the repo, not the cwd.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mkdir -p "$ROOT/logs"
+
 D_MODEL=1280 NUM_HEADS=20 NUM_LAYERS=24 D_FF=3456 \
 SEQ_LENGTH=2048 \
 BATCH_SIZE=16 GRAD_ACCUM_STEPS=2 \
@@ -47,4 +51,4 @@ INIT_FROM=weights_540m_fp32.pt \
 NUM_EPOCHS=1 \
 LEARNING_RATE=2.5e-5 MIN_LR=2.5e-6 WARMUP_STEPS=200 \
 DROPOUT=0.0 \
-python train.py 2>&1 | tee train_540m_hq.log
+python "$ROOT/model/train.py" 2>&1 | tee "$ROOT/logs/train_540m_hq.log"

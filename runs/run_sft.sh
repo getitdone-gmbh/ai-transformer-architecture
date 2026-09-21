@@ -8,6 +8,10 @@
 # (empirically: OOM at 20.7/23.5 GB). Effective batch stays 8*4 = 32.
 set -euo pipefail
 
+# Run from anywhere: everything below is relative to the repo, not the cwd.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mkdir -p "$ROOT/logs"
+
 export WEIGHTS=${WEIGHTS:-weights_540m_fp16.pt}
 export OUT_PATH=${OUT_PATH:-sft_540m.pt}
 export BATCH_SIZE=${BATCH_SIZE:-8}
@@ -16,4 +20,4 @@ export GRAD_ACCUM=${GRAD_ACCUM:-4}
 # widths from fragmenting the allocator.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-python -u sft.py 2>&1 | tee sft_540m.log
+python -u "$ROOT/model/sft.py" 2>&1 | tee "$ROOT/logs/sft_540m.log"

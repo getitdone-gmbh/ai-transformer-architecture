@@ -37,10 +37,10 @@ FAIRNESS RULES (identical treatment for both models):
     very first is predicted exactly once.
 
 Usage:
-    python compare_bpb.py                          # both models, full run
-    SKIP_HF=1 python compare_bpb.py                # only our checkpoint
-    CHECKPOINT=sft_540m_v2.pt python compare_bpb.py
-    HF_MODEL=meta-llama/Llama-3.2-1B python compare_bpb.py
+    python eval/compare_bpb.py                          # both models, full run
+    SKIP_HF=1 python eval/compare_bpb.py                # only our checkpoint
+    CHECKPOINT=sft_540m_v2.pt python eval/compare_bpb.py
+    HF_MODEL=meta-llama/Llama-3.2-1B python eval/compare_bpb.py
 
 Config via ENV (all optional):
     CHECKPOINT=weights_540m_fp32.pt   our checkpoint (base model = fair,
@@ -64,6 +64,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 import time
 
 # A stale token in the local keychain breaks even anonymous HF access
@@ -75,7 +76,12 @@ import tiktoken
 import torch
 import torch.nn.functional as F
 
-import train
+# model/ on sys.path — the repo layout lives in model/paths.py, and
+# anchoring to __file__ is what lets this script run from any directory.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"))
+import train  # noqa: E402
+from paths import EVAL_DATA, ckpt_path, data_path  # noqa: E402
 
 
 def _env(name, default, cast=str):
@@ -85,11 +91,11 @@ def _env(name, default, cast=str):
     return cast(raw)
 
 
-CHECKPOINT = _env("CHECKPOINT", "weights_540m_fp32.pt")
+CHECKPOINT = ckpt_path(_env("CHECKPOINT", "weights_540m_fp32.pt"))
 HF_MODEL = _env("HF_MODEL", "Qwen/Qwen2.5-0.5B")
 SEQ_LEN = int(_env("SEQ_LEN", 2048, float))
 BATCH_SIZE = int(_env("BATCH_SIZE", 2, float))
-EVAL_DIR = _env("EVAL_DIR", "eval_data")
+EVAL_DIR = _env("EVAL_DIR", EVAL_DATA)
 SKIP_HF = _env("SKIP_HF", "0") in ("1", "true")
 SKIP_OURS = _env("SKIP_OURS", "0") in ("1", "true")
 
@@ -207,7 +213,7 @@ def write_exclude_hashes():
             for line in f:
                 text = json.loads(line)["text"]
                 hashes.append(hashlib.md5(text.encode("utf-8")).hexdigest())
-    with open("eval_exclude_hashes.json", "w") as f:
+    with open(data_path("eval_exclude_hashes.json"), "w") as f:
         json.dump({
             "purpose": "md5 of frozen eval docs — prepare_data.py excludes "
                        "these from training data (contamination guard)",

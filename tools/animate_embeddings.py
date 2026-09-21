@@ -8,18 +8,25 @@ from a random cloud to structured clusters.
 Output: embedding_animation.html (Plotly, interactive with a play button).
 
 Run:
-    uv run python animate_embeddings.py
+    uv run python tools/animate_embeddings.py
 """
 
 import glob
 import os
+import sys
 
 import torch
 import tiktoken
 import plotly.graph_objects as go
 
 
-SNAPSHOT_DIR = "snapshots"
+# model/ on sys.path — the repo layout lives in model/paths.py, and
+# anchoring to __file__ is what lets this script run from any directory.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"))
+from paths import ROOT  # noqa: E402
+
+SNAPSHOT_DIR = os.path.join(ROOT, "snapshots")
 
 
 def categorize(token_str):

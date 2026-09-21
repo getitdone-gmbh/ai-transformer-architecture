@@ -8,18 +8,25 @@ This works around the fact that the actual checkpoint file is constantly
 overwritten — we preserve a lean copy per step.
 
 Run alongside the training in progress:
-    uv run python snapshot_embeddings.py
+    uv run python tools/snapshot_embeddings.py
 """
 
 import os
+import sys
 import time
 
 import torch
 
+# model/ on sys.path — the repo layout lives in model/paths.py, and
+# anchoring to __file__ is what lets this script run from any directory.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"))
+from paths import DATA_CACHE, ROOT, ckpt_path  # noqa: E402
 
-CHECKPOINT_PATH = "checkpoint_latest.pt"
-SNAPSHOT_DIR = "snapshots"
-TOKEN_CACHE = "data_cache/tokens-de-50000.pt"
+
+CHECKPOINT_PATH = ckpt_path("checkpoint_latest.pt")
+SNAPSHOT_DIR = os.path.join(ROOT, "snapshots")
+TOKEN_CACHE = os.path.join(DATA_CACHE, "tokens-de-50000.pt")
 TOP_N = 800           # how many of the most frequent tokens we track
 POLL_INTERVAL = 30    # seconds between mtime checks
 

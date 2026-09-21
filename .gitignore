@@ -1,4 +1,5 @@
 # PyTorch Model Checkpoints (large files!)
+checkpoints/
 *.pt
 *.pth
 *.ckpt
@@ -40,6 +41,12 @@ data_cache/
 snapshots/
 embedding_animation.html
 
+# Screen captures for the write-ups (not produced by any script)
+assets/
+
+# Neighbour frequency cache (neighbors_de.py, rebuilt on demand)
+data/neighbors_freq_cache.json
+
 # Token-Shards (prepare_data.py Output, viele GB)
 shards/
 
@@ -47,4 +54,4 @@ shards/
 eval_data/
 
 # Node
-terminal/node_modules/
+serve/terminal/node_modules/

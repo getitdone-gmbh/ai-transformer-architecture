@@ -9,14 +9,14 @@ This is a learning project: the code is deliberately explicit, and the comments 
 | Stage | Artifact | What happened |
 |-------|----------|---------------|
 | 1. Notebook | `transformer.ipynb` | First working model (~44M params) on 1000 Wikipedia articles — attention, causal masking, training loop, all hand-built |
-| 2. Proper training script | `train.py` + `run_124m.sh` | GPT-2-small-class model (124M) on Vast.ai, ~$2–4 per run |
-| 3. Scaling up | `prepare_data.py` + `run_350m.sh` / `run_500m.sh` | Streaming data pipeline (10B tokens as uint16 shards), 540M main run on an H100 (~1.5 days, ~$70) |
-| 4. Fine-tuning | `sft.py` + `run_sft.sh` | SFT on German instruction data with loss masking — turns the text continuator into an answer generator |
-| 5. Serving | `chat_server.py`, `terminal/`, `webapp/` | Local inference server + Ink terminal UI, plus a public CPU demo (FastAPI) |
+| 2. Proper training script | `model/train.py` + `runs/run_124m.sh` | GPT-2-small-class model (124M) on Vast.ai, ~$2–4 per run |
+| 3. Scaling up | `model/prepare_data.py` + `runs/run_350m.sh` / `run_500m.sh` | Streaming data pipeline (10B tokens as uint16 shards), 540M main run on an H100 (~1.5 days, ~$70) |
+| 4. Fine-tuning | `model/sft.py` + `runs/run_sft.sh` | SFT on German instruction data with loss masking — turns the text continuator into an answer generator |
+| 5. Serving | `serve/` — chat server, Ink terminal UI, web demo | Local inference server + Ink terminal UI, plus a public CPU demo (FastAPI) |
 
 ## Architecture
 
-Modern GPT recipe, built up piece by piece in `train.py`:
+Modern GPT recipe, built up piece by piece in `model/train.py`:
 
 - Decoder-only transformer, **pre-LayerNorm** with **RMSNorm**
 - **Rotary position embeddings (RoPE)** with an oversized buffer (4096) for context extrapolation experiments
@@ -26,27 +26,45 @@ Modern GPT recipe, built up piece by piece in `train.py`:
 - bf16 autocast, `torch.compile`, gradient accumulation, cosine LR schedule with warmup, AdamW with selective weight decay
 - Runs on CUDA, Apple Silicon (MPS), and CPU
 
-All hyperparameters are overridable via environment variables, so the same file runs a small local test on a Mac and a multi-day GPU run without edits. The `run_*.sh` scripts are the documented presets:
+All hyperparameters are overridable via environment variables, so the same file runs a small local test on a Mac and a multi-day GPU run without edits. The scripts in `runs/` are the documented presets:
 
 | Preset | Params | d_model / layers / heads | Context | Tokens |
 |--------|--------|--------------------------|---------|--------|
-| `run_124m.sh` | 124M | 768 / 12 / 12 | 512 | ~200M (Wikipedia-DE) |
-| `run_350m.sh` | 355M | 1024 / 24 / 16 | 1024 | ~10B |
-| `run_500m.sh` | 540M | 1280 / 24 / 20 | 2048 | ~10B (FineWeb2-DE + Wikipedia-DE + Python) |
+| `runs/run_124m.sh` | 124M | 768 / 12 / 12 | 512 | ~200M (Wikipedia-DE) |
+| `runs/run_350m.sh` | 355M | 1024 / 24 / 16 | 1024 | ~10B |
+| `runs/run_500m.sh` | 540M | 1280 / 24 / 20 | 2048 | ~10B (FineWeb2-DE + Wikipedia-DE + Python) |
+
+## Layout
+
+```
+model/        the library — train.py, prepare_data.py, sft.py, paths.py
+explain/      scripts that measure the finished model (see below)
+eval/         bpb + cloze benchmarks against a frozen eval set
+tools/        weight export, profiling, embedding snapshots
+serve/        chat_server.py, terminal/ (Ink UI), webapp/ (public demo)
+runs/         the documented training presets + Vast.ai setup
+checkpoints/  *.pt — gitignored, these are gigabytes
+data/         tokenizer and small frozen inputs, checked in
+```
+
+Every script anchors its paths to its own location, not to the working
+directory, so `python explain/duel_de.py` and `cd explain && python duel_de.py`
+do the same thing. `model/paths.py` is the one place that knows the layout.
 
 ## Pipeline
 
 ```
-prepare_data.py   stream sources → tokenize → uint16 shards (~20 GB for 10B tokens)
-train.py          pretraining; reads shards via np.memmap, never loads all data into RAM
-export_weights.py training checkpoint → lean fp16 inference weights (drops Adam state, ~⅓ size)
-sft.py            supervised fine-tuning with loss masking (loss only on the answer tokens)
-chat_server.py    stdlib-only HTTP inference server, loads the model once
-terminal/         Ink (React for the terminal) chat UI talking to chat_server.py
-webapp/           public FastAPI demo, CPU inference, downloads weights from a GitHub release
+model/prepare_data.py   stream sources → tokenize → uint16 shards (~20 GB for 10B tokens)
+model/train.py          pretraining; reads shards via np.memmap, never loads all data into RAM
+tools/export_weights.py training checkpoint → lean fp16 inference weights (drops Adam state, ~⅓ size)
+model/sft.py            supervised fine-tuning with loss masking (loss only on the answer tokens)
+serve/chat_server.py    stdlib-only HTTP inference server, loads the model once
+serve/terminal/         Ink (React for the terminal) chat UI talking to chat_server.py
+serve/webapp/           public FastAPI demo, CPU inference, downloads weights from a GitHub release
 ```
 
 For the full step-by-step guide to renting a GPU on Vast.ai and running a training job, see [VASTAI.md](VASTAI.md).
+
 
 ## Running it
 
@@ -55,18 +73,18 @@ For the full step-by-step guide to renting a GPU on Vast.ai and running a traini
 uv sync
 
 # Small local training run (MPS/CPU-friendly defaults)
-python train.py
+python model/train.py
 
 # Full preset on a CUDA machine — see VASTAI.md
-python prepare_data.py        # once, builds shards/
-bash run_500m.sh
+python model/prepare_data.py       # once, builds shards/
+bash runs/run_500m.sh
 
 # Inference against a checkpoint
-CHECKPOINT=sft_540m_v2.pt CHAT_TEMPLATE=1 python chat_server.py
-cd terminal && npm install && npm start
+CHECKPOINT=sft_540m_v2.pt CHAT_TEMPLATE=1 python serve/chat_server.py
+cd serve/terminal && npm install && npm start
 ```
 
-Model weights are not in the repo (`.gitignore` excludes `*.pt`); the web demo pulls fp16 weights from a GitHub release.
+Model weights are not in the repo (`.gitignore` excludes `checkpoints/`); the web demo pulls fp16 weights from a GitHub release.
 
 ## What the model can and cannot do
 

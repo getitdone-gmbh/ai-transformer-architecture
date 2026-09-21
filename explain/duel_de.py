@@ -13,9 +13,9 @@ Decoding is pure greedy for everyone — deterministic, anyone can rerun
 this and get byte-identical output. That is the point.
 
 Usage:
-    python duel_de.py                 # everything, plain output
-    VIDEO=1 python duel_de.py         # typewriter + pauses (screen recording)
-    SECTION=fakten python duel_de.py  # one section only
+    python explain/duel_de.py                 # everything, plain output
+    VIDEO=1 python explain/duel_de.py         # typewriter + pauses (screen recording)
+    SECTION=fakten python explain/duel_de.py  # one section only
     (sections: complete, fakten, python, english, chat)
 """
 
@@ -28,7 +28,12 @@ os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 import tiktoken
 import torch
 
-import train
+# model/ on sys.path — the repo layout lives in model/paths.py, and
+# anchoring to __file__ is what lets this script run from any directory.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"))
+import train  # noqa: E402
+from paths import ckpt_path  # noqa: E402
 
 VIDEO = os.environ.get("VIDEO", "0") in ("1", "true")
 SECTION = os.environ.get("SECTION", "all")
@@ -40,10 +45,10 @@ MAX_NEW = int(os.environ.get("MAX_NEW", "60"))
 # SKIP_HQ=1 hides the HQ column — video 1 tells the story of run 1
 # (540M vs Qwen); the HQ model is the star of video 2.
 BASE_MODELS = [
-    ("540M    ", "weights_540m_fp32.pt"),
+    ("540M    ", ckpt_path("weights_540m_fp32.pt")),
 ]
 if os.environ.get("SKIP_HQ", "0") not in ("1", "true"):
-    BASE_MODELS.append(("540M HQ ", "weights_540m_hq_fp32.pt"))
+    BASE_MODELS.append(("540M HQ ", ckpt_path("weights_540m_hq_fp32.pt")))
 
 COMPLETION_PROMPTS = [
     "Das größte Landtier der Erde ist der",
@@ -276,7 +281,7 @@ if wanted:
         show(title, prompts, rows)
 
 if SECTION in ("all", "chat"):
-    sft = load_ours("sft_540m_v2.pt")
+    sft = load_ours(ckpt_path("sft_540m_v2.pt"))
     b_ours = [gen_ours(sft, PROMPT_TMPL.format(frage=q), stop_at_eot=True)
               for q in QUESTIONS]
     free(sft)
@@ -298,4 +303,4 @@ if SECTION in ("all", "chat"):
 
 say("")
 say("Alle Modelle: pures greedy decoding — deterministisch,")
-say("reproduzierbar mit: python duel_de.py")
+say("reproduzierbar mit: python explain/duel_de.py")

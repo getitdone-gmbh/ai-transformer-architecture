@@ -28,8 +28,8 @@ things differ — and each one has a reason:
 
 Runs on the M4 Max (MPS) in a few hours. ENV overrides as everywhere.
 
-    python sft.py                          # takes weights_540m_fp32.pt
-    WEIGHTS=andere.pt EPOCHS=1 python sft.py
+    python model/sft.py                          # takes weights_540m_fp32.pt
+    WEIGHTS=andere.pt EPOCHS=1 python model/sft.py
 """
 
 import math
@@ -43,13 +43,14 @@ from torch.utils.data import DataLoader, Dataset
 
 from datasets import load_dataset
 
+from paths import ckpt_path
 from train import (
     GPTDecoder, configure_optimizer, get_amp_dtype, get_device, get_lr, _env,
 )
 from contextlib import nullcontext
 
-WEIGHTS = _env("WEIGHTS", "weights_540m_fp32.pt", str)
-OUT_PATH = _env("OUT_PATH", "sft_540m.pt", str)
+WEIGHTS = ckpt_path(_env("WEIGHTS", "weights_540m_fp32.pt", str))
+OUT_PATH = ckpt_path(_env("OUT_PATH", "sft_540m.pt", str))
 DATASET = _env("DATASET", "FreedomIntelligence/alpaca-gpt4-deutsch", str)
                                        # multiple datasets: comma-separated
 LIMIT = _env("LIMIT", 0, int)          # 0 = all examples; >0 for smoke tests

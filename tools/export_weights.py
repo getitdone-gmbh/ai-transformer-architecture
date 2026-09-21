@@ -10,7 +10,7 @@ This export throws both out: only model_state_dict, cast to fp16.
 The config travels along in the file so the loading code does not have
 to guess the architecture (same idea as in chat_server.py).
 
-    python export_weights.py checkpoint_epoch_1.pt weights_124m_fp16.pt
+    python tools/export_weights.py checkpoint_epoch_1.pt weights_124m_fp16.pt
 """
 
 import sys

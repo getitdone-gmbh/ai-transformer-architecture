@@ -31,14 +31,15 @@ its German binding, not knowledge alone. Kept as a lesson: register
 predictions before measuring, and read your own eval's fine print.
 
 Usage:
-    python cloze_eval.py                    # our checkpoint + Qwen
-    SKIP_HF=1 python cloze_eval.py          # ours only
+    python eval/cloze_eval.py                    # our checkpoint + Qwen
+    SKIP_HF=1 python eval/cloze_eval.py          # ours only
     CHECKPOINT=... HF_MODEL=... CLOZE_FILE=... SHOW_SAMPLES=8
 """
 
 import json
 import math
 import os
+import sys
 
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 
@@ -46,10 +47,18 @@ import tiktoken
 import torch
 import torch.nn.functional as F
 
-import train
-from compare_bpb import HF_MODEL, SKIP_HF, SKIP_OURS, load_hf, load_ours
+# model/ on sys.path — the repo layout lives in model/paths.py, and
+# anchoring to __file__ is what lets this script run from any directory.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"))
+import train  # noqa: E402
+from compare_bpb import (  # noqa: E402
+    HF_MODEL, SKIP_HF, SKIP_OURS, load_hf, load_ours)
 
-CLOZE_FILE = os.environ.get("CLOZE_FILE", "cloze_de.jsonl")
+# The cloze set sits next to this script, not in the working directory.
+CLOZE_FILE = os.environ.get(
+    "CLOZE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "cloze_de.jsonl"))
 SHOW_SAMPLES = int(os.environ.get("SHOW_SAMPLES", "8"))
 
 

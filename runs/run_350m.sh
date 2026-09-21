@@ -22,6 +22,10 @@
 # On "CUDA out of memory": BATCH_SIZE=4 GRAD_ACCUM_STEPS=16.
 set -euo pipefail
 
+# Run from anywhere: everything below is relative to the repo, not the cwd.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mkdir -p "$ROOT/logs"
+
 D_MODEL=1024 NUM_HEADS=16 NUM_LAYERS=24 D_FF=2752 \
 SEQ_LENGTH=1024 \
 BATCH_SIZE=8 GRAD_ACCUM_STEPS=8 \
@@ -29,4 +33,4 @@ SHARD_MANIFEST=shards/manifest.json \
 NUM_EPOCHS=1 \
 LEARNING_RATE=3e-4 MIN_LR=3e-5 WARMUP_STEPS=2000 \
 DROPOUT=0.0 \
-python train.py 2>&1 | tee train_350m.log
+python "$ROOT/model/train.py" 2>&1 | tee "$ROOT/logs/train_350m.log"

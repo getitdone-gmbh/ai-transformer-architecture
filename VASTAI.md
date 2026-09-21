@@ -2,9 +2,9 @@
 
 Goal: train a base model on German data so we can then use it as a
 sandbox for compression (pruning, quantization, …). The walkthrough
-below uses the 124M run (GPT-2-small class, `run_124m.sh`) — the larger
-presets (`run_350m.sh`, `run_500m.sh`) work identically, but they need
-`prepare_data.py` (shard pipeline) beforehand and a stronger GPU;
+below uses the 124M run (GPT-2-small class, `runs/run_124m.sh`) — the larger
+presets (`runs/run_350m.sh`, `runs/run_500m.sh`) work identically, but they
+need `model/prepare_data.py` (shard pipeline) beforehand and a stronger GPU;
 details are in the comments of each run script.
 
 ## 1. Choose an instance
@@ -39,28 +39,29 @@ On the instance:
 ```bash
 git clone https://github.com/getitdone-gmbh/ai-transformer-architecture.git   # or upload via scp
 cd ai-transformer-architecture
-bash vastai_setup.sh                          # installs tiktoken, datasets, numpy
+bash runs/vastai_setup.sh                     # installs tiktoken, datasets, numpy
 ```
 
 No git remote? Then upload from your local machine (only the files needed):
 
 ```bash
 # from your local machine:
-scp -P <PORT> train.py run_124m.sh vastai_setup.sh root@<HOST>:~/ai-transformer-architecture/
+scp -P <PORT> model/train.py model/paths.py root@<HOST>:~/ai-transformer-architecture/model/
+scp -P <PORT> runs/run_124m.sh runs/vastai_setup.sh root@<HOST>:~/ai-transformer-architecture/runs/
 ```
 
 ## 4. Start training
 
 ```bash
-bash run_124m.sh
+bash runs/run_124m.sh
 ```
 
-This runs in the foreground and writes live to `train_124m.log`. For a
+This runs in the foreground and writes live to `logs/train_124m.log`. For a
 run that survives an SSH disconnect:
 
 ```bash
-nohup bash run_124m.sh > train_124m.log 2>&1 &
-tail -f train_124m.log     # watch; Ctrl-C only kills the tail, not the run
+nohup bash runs/run_124m.sh > logs/train_124m.log 2>&1 &
+tail -f logs/train_124m.log   # watch; Ctrl-C only kills the tail, not the run
 ```
 
 Expected output at the start: device `cuda`, `Parameters: 123,588,096`,
@@ -69,7 +70,7 @@ of `torch.compile` (JIT) — after that it picks up speed.
 
 ### Knobs (if needed)
 
-- **`CUDA out of memory`:** in `run_124m.sh` set `BATCH_SIZE=8 GRAD_ACCUM_STEPS=6`
+- **`CUDA out of memory`:** in `runs/run_124m.sh` set `BATCH_SIZE=8 GRAD_ACCUM_STEPS=6`
   (the effective batch stays at 48).
 - **Stronger model / more data:** raise `NUM_ARTICLES` (up to ~2.8M = the entire
   German Wikipedia) and/or `NUM_EPOCHS=2`. Note: 400k articles ≈ 200M tokens —
@@ -90,13 +91,14 @@ bottleneck).
 
 ## 6. Retrieve the checkpoint
 
-After the run, the instance holds `checkpoint_epoch_1.pt` (end of epoch) and
-`checkpoint_latest.pt` (rolling). **The instance is ephemeral — save the
+After the run, the instance holds `checkpoints/checkpoint_epoch_1.pt` (end of
+epoch) and `checkpoints/checkpoint_latest.pt` (rolling). **The instance is ephemeral — save the
 checkpoint before you destroy it:**
 
 ```bash
 # from your local machine:
-scp -P <PORT> root@<HOST>:~/ai-transformer-architecture/checkpoint_epoch_1.pt ./checkpoint_124m.pt
+scp -P <PORT> root@<HOST>:~/ai-transformer-architecture/checkpoints/checkpoint_epoch_1.pt \
+    ./checkpoints/checkpoint_124m.pt
 ```
 
 Then **destroy** the Vast.ai instance (don't just stop it), otherwise it

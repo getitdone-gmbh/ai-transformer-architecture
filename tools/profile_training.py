@@ -8,12 +8,18 @@ Runs in ~30-60 seconds and has no effect on a training run happening in
 parallel (separate process).
 """
 
+import os
+import sys
 import time
 
 import torch
 import torch.nn as nn
 
-from train import (
+# model/ on sys.path — the repo layout lives in model/paths.py, and
+# anchoring to __file__ is what lets this script run from any directory.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"))
+from train import (  # noqa: E402
     GPTDecoder,
     configure_optimizer,
     D_MODEL, NUM_HEADS, D_FF, NUM_LAYERS, DROPOUT,

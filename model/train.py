@@ -21,6 +21,10 @@ import numpy as np
 import tiktoken
 from datasets import load_dataset
 
+# Repo layout (checkpoints/, data/, shards/ ...) — anchored to this file,
+# so a run does not depend on the directory it was started from.
+from paths import CHECKPOINTS, DATA_CACHE, ROOT, ckpt_path
+
 
 # ============================================================
 # Hyperparameters
@@ -31,7 +35,7 @@ from datasets import load_dataset
 # on MPS) and large on a Vast.ai GPU (124M) WITHOUT editing the file —
 # which keeps remote runs reproducible and diff-free.
 #
-#   Example:  D_MODEL=768 NUM_LAYERS=12 python train.py
+#   Example:  D_MODEL=768 NUM_LAYERS=12 python model/train.py
 
 def _env(name, default, cast=str):
     """Reads env var `name` and casts it; otherwise falls back to `default`."""
@@ -73,18 +77,21 @@ USE_AMP = _env("USE_AMP", True, bool)       # bf16 autocast if the hardware supp
 # Data
 NUM_ARTICLES = _env("NUM_ARTICLES", 400000, int)
 VAL_FRACTION = _env("VAL_FRACTION", 0.02, float)  # fraction of tokens for the validation split
-DATA_CACHE_DIR = _env("DATA_CACHE_DIR", "data_cache", str)  # token cache for re-runs
+DATA_CACHE_DIR = _env("DATA_CACHE_DIR", DATA_CACHE, str)  # token cache for re-runs
 # Shard mode (large runs): path to shards/manifest.json produced by
 # prepare_data.py. When set, the uint16 shards are read via memmap
 # instead of the small in-RAM token cache above.
 SHARD_MANIFEST = _env("SHARD_MANIFEST", "", str)
+# A bare "shards/manifest.json" is resolved against the repo, not the cwd.
+if SHARD_MANIFEST and not os.path.isabs(SHARD_MANIFEST):
+    SHARD_MANIFEST = os.path.join(ROOT, SHARD_MANIFEST)
 # DataLoader processes: default 4 on CUDA (shard reads run in parallel with
 # the GPU), 0 on MPS/CPU — there, macOS' spawn start would COPY the in-RAM
 # token tensor once per worker (expensive) while the gain is minimal.
 NUM_WORKERS = _env("NUM_WORKERS", 4 if torch.cuda.is_available() else 0, int)
 
 # Checkpoints
-CHECKPOINT_DIR = "."
+CHECKPOINT_DIR = _env("CHECKPOINT_DIR", CHECKPOINTS, str)
 CHECKPOINT_EVERY_N_EPOCHS = 1     # full epochs are long now -> save every one
 CHECKPOINT_EVERY_N_STEPS = 2000   # plus a rolling 'checkpoint_latest.pt'
 AUTO_RESUME = True                # automatically load the newest checkpoint
@@ -96,6 +103,8 @@ RESUME_FROM = None                # overrides AUTO_RESUME when set
 # finished weights, typically with a much lower peak LR. A found resume
 # checkpoint takes precedence, so a crashed warm-start run resumes itself.
 INIT_FROM = _env("INIT_FROM", "", str)
+if INIT_FROM:
+    INIT_FROM = ckpt_path(INIT_FROM)   # bare name -> checkpoints/
 # Architecture marker in the checkpoint so old files can be detected
 ARCH_VERSION = "pre_ln_tied_swiglu_rope_init_rms_v1"
 
@@ -1136,7 +1145,7 @@ def main():
         if not os.path.exists(SHARD_MANIFEST):
             raise FileNotFoundError(
                 f"SHARD_MANIFEST='{SHARD_MANIFEST}' does not exist — "
-                "run `python prepare_data.py` first."
+                "run `python model/prepare_data.py` first."
             )
         train_ds = ShardDataset(SHARD_MANIFEST, SEQ_LENGTH, "train", VAL_FRACTION)
         val_ds = ShardDataset(SHARD_MANIFEST, SEQ_LENGTH, "val", VAL_FRACTION)

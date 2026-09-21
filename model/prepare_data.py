@@ -46,6 +46,9 @@ import numpy as np
 import tiktoken
 from datasets import load_dataset
 
+# Repo layout — see model/paths.py.
+from paths import SHARDS, data_path
+
 
 def _env(name, default, cast=str):
     raw = os.environ.get(name)
@@ -60,7 +63,7 @@ WIKI_TOKENS = int(_env("WIKI_TOKENS", 2e9, float))
 CODE_TOKENS = int(_env("CODE_TOKENS", 1e9, float))
 HQ_TOKENS = int(_env("HQ_TOKENS", 0, float))  # FineWeb2-HQ German, default off
 SHARD_TOKENS = int(_env("SHARD_TOKENS", 1e8, float))
-SHARD_DIR = _env("SHARD_DIR", "shards")
+SHARD_DIR = _env("SHARD_DIR", SHARDS)
 DOCS_PER_BATCH = 512   # documents per encode_ordinary_batch call
 
 # Contamination guard: md5 hashes of documents that must NEVER enter the
@@ -69,7 +72,7 @@ DOCS_PER_BATCH = 512   # documents per encode_ordinary_batch call
 # documents our eval set was built from; training on them would silently
 # inflate every future before/after measurement. Exact-hash matching
 # catches exactly that case (HQ keeps the text verbatim).
-EXCLUDE_HASHES = _env("EXCLUDE_HASHES", "eval_exclude_hashes.json")
+EXCLUDE_HASHES = data_path(_env("EXCLUDE_HASHES", "eval_exclude_hashes.json"))
 
 # Source definitions: (name, token_budget, load_dataset kwargs, text_field).
 #   - FineWeb2: quality-filtered, deduplicated web German — the modern
