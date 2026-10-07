@@ -43,6 +43,11 @@ Usage:
     MODEL=~/gemma_de_work/models/E2B_B64k_init TOKENS=5e7 \\
     OUT=~/gemma_de_work/models/E2B_B64k_rows python gemma_de/train_new_rows.py
     LORA_RANK=16 OUT=~/gemma_de_work/models/E2B_B64k_lora ...   # + LoRA
+
+CONTROL RUN: MODEL=google/gemma-4-E2B (original tokenizer, no new rows)
+with the same LoRA and the same documents. B_64k needs 8% fewer tokens
+on this training mix, so TOKENS=5.4e7 reads the same text as 5e7 B_64k
+tokens. Only the difference between the two runs is the tokenizer's cost.
 """
 
 import fnmatch
@@ -183,9 +188,15 @@ def merge_rows(tables):
 
 def main():
     model, tok = load(MODEL)
-    tables = split_rows(model)
+    # The control run (original Gemma, original tokenizer) has no new rows:
+    # then only the LoRA trains.
+    has_new = model.get_input_embeddings().weight.shape[0] > N_OLD
+    tables = split_rows(model) if has_new else []
+    if not has_new:
+        for p in model.parameters():
+            p.requires_grad_(False)
     params = [t.new_rows for t in tables]
-    groups = [dict(params=params, lr=LR)]
+    groups = [dict(params=params, lr=LR)] if params else []
     wrapped = add_lora(model) if LORA_RANK else []
     if wrapped:
         lora_params = [p for _, _, m in wrapped for p in (m.A, m.B)]
@@ -235,6 +246,9 @@ def main():
         setattr(mod, child_name, lora.merged())
     model.save_pretrained(OUT)
     src = os.path.expanduser(MODEL)
+    if not os.path.isdir(src):   # a hub id (control run): use its snapshot
+        from huggingface_hub import snapshot_download
+        src = snapshot_download(MODEL, allow_patterns=KEEP)
     for fname in os.listdir(src):
         if any(fnmatch.fnmatch(fname, pat) for pat in KEEP):
             shutil.copyfile(os.path.join(src, fname), os.path.join(OUT, fname))
